@@ -209,8 +209,8 @@
   .qfold .oneline { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
 
   .block { margin-top: 14px; border: 1px solid var(--rule); border-radius: 3px; padding: 8px 11px 9px; }
-  .block.conclusion { border-left: 2px solid var(--rule); }
-  .block.conclusion.filled { border-left: 2px solid var(--gold); }
+  .block.conclusion, .block.takeaways { border-left: 2px solid var(--rule); }
+  .block.conclusion.filled, .block.takeaways.filled { border-left: 2px solid var(--gold); }
   .blockhead { display: flex; align-items: center; gap: 8px; margin-bottom: 2px; }
   .blockhead .grow { flex: 1; }
   .blocktext { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13.5px; }
@@ -233,6 +233,28 @@
   }
   .editrow { display: flex; gap: 8px; margin-top: 7px; align-items: center; }
   .hint { color: var(--muted); font-size: 10.5px; }
+
+  ul.takeaways { list-style: none; margin: 3px 0 0; padding: 0; font-size: 13.5px; }
+  ul.takeaways li { display: flex; gap: 8px; padding: 1px 0; overflow-wrap: anywhere; }
+  ul.takeaways li::before { content: "—"; color: var(--gold-deep); flex: none; }
+
+  .assets { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+  .asset {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    border: 1px solid var(--rule);
+    background: transparent;
+    border-radius: 3px;
+    padding: 1px 8px;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--muted);
+    max-width: 330px;
+  }
+  .asset:hover { background: var(--btn); border-color: var(--edge-soft); color: var(--ink); text-decoration: none; }
+  .asset .txt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .asset .arrow { flex: none; font-size: 10px; opacity: 0.7; }
 
   .sublist { margin-top: 22px; }
   .sublabel { display: flex; align-items: center; gap: 8px; }
@@ -475,6 +497,13 @@ function firstLine(text) {
   const line = String(text || "").split("\n").find((l) => l.trim());
   return line ? line.trim() : "";
 }
+function listField(entry, field) {
+  const raw = entry[field];
+  return Array.isArray(raw) ? raw.filter((v) => typeof v === "string" && v.trim()) : [];
+}
+function assetsOf(entry) {
+  return Array.isArray(entry.assets) ? entry.assets.filter((a) => a && a.location) : [];
+}
 
 async function api(path, opts) {
   const res = await fetch(path, opts);
@@ -537,6 +566,8 @@ function matchesSearch(entry) {
     (entry.tags || []).join(" "),
     (entry.commits || []).join(" "),
     (entry.job_ids || []).join(" "),
+    listField(entry, "takeaways").join("   "),
+    assetsOf(entry).map((a) => (a.label || "") + " " + a.location).join("   "),
   ];
   const hay = parts.filter(Boolean).join("   ").toLowerCase();
   return q.split(/\s+/).every((tok) => hay.includes(tok));
@@ -701,10 +732,12 @@ function refChip(entry, fallbackId) {
   return btn;
 }
 
-function editableBlock(entry, field, label, extraClass) {
+// asList: the field is a list of strings edited as one-per-line text (takeaways).
+function editableBlock(entry, field, label, extraClass, asList) {
   const box = el("div", "block" + (extraClass ? " " + extraClass : ""));
-  const value = entry[field] || "";
-  if (extraClass === "conclusion" && value) box.classList.add("filled");
+  const items = asList ? listField(entry, field) : null;
+  const value = asList ? items.join("\n") : entry[field] || "";
+  if ((extraClass === "conclusion" || extraClass === "takeaways") && value) box.classList.add("filled");
   const head = el("div", "blockhead");
   head.appendChild(el("span", "label grow", label));
   const editKey = entry.id + ":" + field;
@@ -712,13 +745,16 @@ function editableBlock(entry, field, label, extraClass) {
   if (state.editing && state.editing.key === editKey) {
     const ta = el("textarea", "editor");
     ta.value = state.editing.value !== null ? state.editing.value : value;
+    if (asList) ta.placeholder = "one takeaway per line";
     ta.oninput = () => {
       state.editing.value = ta.value;
     };
     const save = () => {
-      const next = ta.value;
+      const next = asList
+        ? ta.value.split("\n").map((l) => l.trim()).filter(Boolean)
+        : ta.value;
       state.editing = null;
-      const prev = entry[field] || "";
+      const prev = entry[field];
       entry[field] = next;
       render();
       pushUpdate(entry.id, { [field]: next }, () => {
@@ -746,7 +782,8 @@ function editableBlock(entry, field, label, extraClass) {
     };
     row.appendChild(saveBtn);
     row.appendChild(cancel);
-    row.appendChild(el("span", "hint", "⌘/Ctrl+Enter saves · Esc cancels"));
+    const hint = (asList ? "one per line · " : "") + "⌘/Ctrl+Enter saves · Esc cancels";
+    row.appendChild(el("span", "hint", hint));
     box.appendChild(row);
     setTimeout(() => {
       // never steal focus from the search box when a re-render happens with an editor open
@@ -766,8 +803,59 @@ function editableBlock(entry, field, label, extraClass) {
   };
   head.appendChild(edit);
   box.appendChild(head);
-  box.appendChild(el("div", "blocktext" + (value ? "" : " empty"), value || "— none —"));
+  if (asList && items.length) {
+    const list = el("ul", "takeaways");
+    for (const item of items) list.appendChild(el("li", null, item));
+    box.appendChild(list);
+  } else {
+    box.appendChild(el("div", "blocktext" + (value ? "" : " empty"), value || "— none —"));
+  }
   return box;
+}
+
+function assetsLine(entry) {
+  const assets = assetsOf(entry);
+  if (!assets.length) return null;
+  const line = el("div", "assets");
+  line.appendChild(el("span", "label", "assets"));
+  for (const asset of assets) {
+    const loc = String(asset.location);
+    const text = String(asset.label || loc);
+    const lower = loc.toLowerCase();
+    if (lower.startsWith("http://") || lower.startsWith("https://")) {
+      const link = document.createElement("a");
+      link.className = "asset";
+      link.href = loc;
+      link.target = "_blank";
+      link.rel = "noreferrer";
+      link.title = loc;
+      link.appendChild(el("span", "txt", text));
+      link.appendChild(el("span", "arrow", "↗"));
+      line.appendChild(link);
+    } else {
+      const btn = el("button", "asset");
+      btn.title = loc + " — click to copy";
+      btn.appendChild(el("span", "txt", text));
+      btn.appendChild(el("span", "arrow", "⧉"));
+      btn.onclick = (ev) => {
+        ev.stopPropagation();
+        copyLocation(loc);
+      };
+      line.appendChild(btn);
+    }
+  }
+  return line;
+}
+
+function copyLocation(loc) {
+  if (!navigator.clipboard || !navigator.clipboard.writeText) {
+    toast("clipboard unavailable", true);
+    return;
+  }
+  navigator.clipboard.writeText(loc).then(
+    () => toast("copied " + loc),
+    () => toast("copy failed", true)
+  );
 }
 
 function metaText(node, text) {
@@ -802,6 +890,8 @@ function diffRow(entry) {
   row.appendChild(meta);
 
   if (entry.summary) row.appendChild(el("div", "rsummary", entry.summary));
+  const assets = assetsLine(entry);
+  if (assets) row.appendChild(assets);
 
   const files = entry.files || [];
   if (files.length || entry.patch) {
@@ -877,6 +967,8 @@ function expRow(entry) {
   row.appendChild(meta);
 
   if (entry.summary) row.appendChild(el("div", "rsummary", entry.summary));
+  const assets = assetsLine(entry);
+  if (assets) row.appendChild(assets);
 
   const diffIds = entry.diff_ids || [];
   if (diffIds.length) {
@@ -928,7 +1020,9 @@ function questionSection(question, diffs, exps) {
 
   if (collapsed) {
     const fold = el("div", "qfold");
-    const counts = diffs.length + " diffs · " + exps.length + " experiments";
+    const nTakeaways = listField(question, "takeaways").length;
+    let counts = diffs.length + " diffs · " + exps.length + " experiments";
+    if (nTakeaways) counts += " · " + nTakeaways + " takeaways";
     fold.appendChild(el("span", "counts", counts));
     fold.appendChild(el("span", "oneline", firstLine(question.conclusion) || "no conclusion yet"));
     section.appendChild(fold);
@@ -937,6 +1031,9 @@ function questionSection(question, diffs, exps) {
 
   if (question.summary) section.appendChild(el("p", "qsummary", question.summary));
   section.appendChild(editableBlock(question, "conclusion", "conclusion", "conclusion"));
+  section.appendChild(editableBlock(question, "takeaways", "takeaways", "takeaways", true));
+  const qassets = assetsLine(question);
+  if (qassets) section.appendChild(qassets);
   if (diffs.length) section.appendChild(subList("diffs", diffs, diffRow));
   if (exps.length) section.appendChild(subList("experiments", exps, expRow));
   if (!diffs.length && !exps.length) {

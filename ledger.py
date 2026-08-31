@@ -8,6 +8,7 @@ import os
 import re
 import subprocess
 import sys
+from collections import Counter
 from datetime import datetime
 
 DEFAULT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
@@ -149,7 +150,9 @@ def cmd_add_question(args: argparse.Namespace) -> None:
         "summary": args.summary or "",
         "status": args.status,
         "conclusion": "",
+        "takeaways": [],
         "tags": split_list(args.tags),
+        "assets": [],
         "created": ts,
         "updated": ts,
     }
@@ -197,6 +200,7 @@ def cmd_add_diff(args: argparse.Namespace) -> None:
         "status": args.status,
         "notes": "",
         "tags": split_list(args.tags),
+        "assets": [],
         "created": ts,
         "updated": ts,
     }
@@ -233,6 +237,7 @@ def cmd_add_exp(args: argparse.Namespace) -> None:
         "wandb": split_list(args.wandb),
         "results": "",
         "tags": split_list(args.tags),
+        "assets": [],
         "created": ts,
         "updated": ts,
     }
@@ -246,6 +251,26 @@ def append_dedup(entry: dict, key: str, values: list[str]) -> None:
         if value not in existing:
             existing.append(value)
     entry[key] = existing
+
+
+def add_asset(entry: dict, label: str, location: str) -> None:
+    """Append an {label, location} asset; dedup on location."""
+    assert label.strip(), "asset label must not be empty"
+    assert location.strip(), "asset location must not be empty"
+    assets = [a for a in (entry.get("assets") or []) if isinstance(a, dict)]
+    if any(a.get("location") == location.strip() for a in assets):
+        entry["assets"] = assets
+        return
+    assets.append({"label": label.strip(), "location": location.strip()})
+    entry["assets"] = assets
+
+
+def parse_asset(spec: str) -> tuple[str, str]:
+    """'label=location' -> (label, location); location may itself contain '='."""
+    label, sep, location = spec.partition("=")
+    assert sep, f"--add-asset expects 'label=location', got: {spec}"
+    assert label.strip() and location.strip(), f"--add-asset needs a non-empty label and location: {spec}"
+    return label.strip(), location.strip()
 
 
 def cmd_update(args: argparse.Namespace) -> None:
@@ -292,6 +317,15 @@ def cmd_update(args: argparse.Namespace) -> None:
         append_dedup(entry, "wandb", split_list(args.add_wandb))
     if args.add_tags:
         append_dedup(entry, "tags", split_list(args.add_tags))
+    if args.add_takeaway:
+        assert kind == "question", "--add-takeaway applies to question entries"
+        takeaways = [t.strip() for t in args.add_takeaway if t.strip()]
+        assert takeaways, "--add-takeaway text must not be empty"
+        append_dedup(entry, "takeaways", takeaways)
+    if args.add_asset:
+        for spec in args.add_asset:
+            label, location = parse_asset(spec)
+            add_asset(entry, label, location)
 
     entry["updated"] = now_ts()
     write_entry(path, entry)
@@ -365,6 +399,104 @@ def cmd_list(args: argparse.Namespace) -> None:
         print("  ".join(value.ljust(widths[i]) for i, value in enumerate(r)).rstrip())
 
 
+SEARCH_WEIGHTS = {
+    "takeaways": 5,
+    "conclusion": 4,
+    "title": 3,
+    "tags": 3,
+    "summary": 2,
+    "results": 2,
+    "notes": 2,
+    "id": 1,
+    "cluster": 1,
+    "branch": 1,
+    "worktree": 1,
+    "repo": 1,
+    "files": 1,
+    "commits": 1,
+    "job_ids": 1,
+    "wandb": 1,
+    "assets": 1,
+}
+SNIPPET_FIELDS = ("takeaways", "conclusion", "results", "summary", "notes", "title")
+SNIPPET_WIDTH = 140
+
+
+def tokenize(text: str) -> list[str]:
+    return re.findall(r"[a-z0-9]+", text.lower())
+
+
+def field_text(entry: dict, key: str) -> str:
+    """Searchable text of one field; list items (incl. asset dicts) become one line each."""
+    value = entry.get(key)
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        lines = []
+        for item in value:
+            if isinstance(item, dict):
+                lines.append(" ".join(str(v) for v in item.values()))
+            else:
+                lines.append(str(item))
+        return "\n".join(lines)
+    return str(value)
+
+
+def trim_snippet(line: str, width: int = SNIPPET_WIDTH) -> str:
+    line = " ".join(line.split())
+    return line if len(line) <= width else line[: width - 1] + "…"
+
+
+def snippets_for(entry: dict, tokens: list[str], limit: int = 3) -> list[str]:
+    snippets: list[str] = []
+    for key in SNIPPET_FIELDS:
+        for line in field_text(entry, key).splitlines():
+            if not line.strip():
+                continue
+            if not any(token in set(tokenize(line)) for token in tokens):
+                continue
+            snippet = trim_snippet(line)
+            if snippet not in snippets:
+                snippets.append(snippet)
+            if len(snippets) >= limit:
+                return snippets
+    return snippets
+
+
+def search_entries(entries: list[dict], query: str, limit: int = 8) -> list[tuple[dict, int, list[str]]]:
+    """(entry, score, snippets) for entries matching query, best first. Shared by the CLI and the MCP."""
+    tokens = tokenize(query)
+    assert tokens, "query must contain at least one alphanumeric token"
+    hits = []
+    for entry in entries:
+        score = 0
+        for key, weight in SEARCH_WEIGHTS.items():
+            counts = Counter(tokenize(field_text(entry, key)))
+            score += weight * sum(counts[token] for token in tokens)
+        if score:
+            hits.append((entry, score, snippets_for(entry, tokens)))
+    hits.sort(key=lambda hit: (hit[1], hit[0].get("updated", "")), reverse=True)
+    return hits[:limit]
+
+
+def cmd_search(args: argparse.Namespace) -> None:
+    root = ledger_root()
+    entries = load_all(root)
+    if args.kind:
+        entries = [e for e in entries if e.get("kind") == args.kind]
+    hits = search_entries(entries, args.query, args.limit)
+    if not hits:
+        print("(no matches)")
+        return
+    for entry, score, snippets in hits:
+        head = f"{entry.get('kind', '')}:{entry.get('status', '')}"
+        print(f"{score:>4}  {entry.get('id', '')}  {head}  {entry.get('title', '')}")
+        for snippet in snippets:
+            print(f"        {snippet}")
+
+
 def cmd_show(args: argparse.Namespace) -> None:
     root = ledger_root()
     path = entry_path(root, args.id)
@@ -423,6 +555,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--add-jobs")
     p.add_argument("--add-wandb")
     p.add_argument("--add-tags")
+    p.add_argument(
+        "--add-takeaway",
+        action="append",
+        help="questions only: a short self-contained finding; repeatable",
+    )
+    p.add_argument(
+        "--add-asset",
+        action="append",
+        metavar="LABEL=LOCATION",
+        help="attach an artifact (checkpoint, video, plot, wandb url); repeatable",
+    )
     p.set_defaults(func=cmd_update)
 
     p = sub.add_parser("set-status", help="shorthand for update --status")
@@ -434,6 +577,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--kind", choices=["question", "diff", "experiment"])
     p.add_argument("--status")
     p.set_defaults(func=cmd_list)
+
+    p = sub.add_parser("search", help="rank entries against a query (takeaways weighted highest)")
+    p.add_argument("query")
+    p.add_argument("--kind", choices=["question", "diff", "experiment"])
+    p.add_argument("--limit", type=int, default=8)
+    p.set_defaults(func=cmd_search)
 
     p = sub.add_parser("show", help="pretty-print one entry")
     p.add_argument("id")

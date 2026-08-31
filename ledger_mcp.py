@@ -12,6 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ledger import (  # noqa: E402
     EXP_STATUSES,
     QUESTION_STATUSES,
+    add_asset,
     append_dedup,
     assert_question_exists,
     atomic_write,
@@ -23,6 +24,7 @@ from ledger import (  # noqa: E402
     load_all,
     load_entry,
     now_ts,
+    search_entries,
     slugify,
     subdirs,
     unique_id,
@@ -33,39 +35,77 @@ from ledger import (  # noqa: E402
 PROTOCOL_VERSION = "2024-11-05"
 SERVER_INFO = {"name": "uwlab-ledger", "version": "1.0.0"}
 
+SEARCH_DIRECTIVE = (
+    "NEXT STEP (required): spawn a background subagent (e.g. the Explore agent) to search this ledger for "
+    "prior knowledge relevant to this work — have it call the `ledger_search` MCP tool (or run "
+    "`python3 /home/yandabao/ledger/ledger.py search '<terms>'`) with 2-3 phrasings of the topic, read the "
+    "takeaways of any matching questions, and report back anything that should change your plan. Incorporate "
+    "relevant takeaways before proceeding."
+)
+
 GUIDE = """UWLab ledger — what to write and how.
 
 The ledger is a shared record of research questions and the work done under them. It lives outside
-any worktree, so entries written from one worktree are visible everywhere.
+any worktree, so entries written from one worktree are visible everywhere. It is agent-driven: the
+user hands a session a research question or an experiment, and the session finds-or-creates the
+question, attaches the work to it, and keeps it current.
 
 HIERARCHY
-  question -> diffs + experiments. A question is the research line; every diff and experiment
-  should carry the question_id of the line it belongs to.
+  question -> diffs + experiments + assets. A question is the research line; every diff and
+  experiment should carry the question_id of the line it belongs to.
 
 ENTRY KINDS
   question    one research line, long-lived. Fields: id, title, summary, status, conclusion,
-              tags[]. status: open | answered | parked -- agents keep this current.
-              conclusion: the evolving answer, updated as evidence comes in.
+              takeaways[], tags[], assets[]. status: open | answered | parked -- agents keep this
+              current. conclusion: the evolving answer narrative, updated as evidence comes in.
+              takeaways: the stable distilled findings (see TAKEAWAYS below).
   diff        one coherent code change. Fields: id, title, summary, question_id, repo, worktree,
-              branch, commits[], files[], patch (stored under patches/), status, notes, tags[].
-              status: unreviewed | questionable | known_good  -- SET BY THE USER, not by agents.
-              notes: also the user's. Agents never write status or notes on a diff.
+              branch, commits[], files[], patch (stored under patches/), status, notes, tags[],
+              assets[]. status: unreviewed | questionable | known_good -- SET BY THE USER, not by
+              agents. notes: also the user's. Agents never write status or notes on a diff.
   experiment  one run (or one tightly-coupled set of runs). Fields: id, title, summary,
-              question_id, diff_ids[], status, cluster, job_ids[], wandb[], results, tags[].
-              status: planned | running | done | killed | failed  -- agents keep this current.
+              question_id, diff_ids[], status, cluster, job_ids[], wandb[], results, tags[],
+              assets[]. status: planned | running | done | killed | failed -- agents keep current.
 
-WORKFLOW
-  1. Find or create the question: ledger_list(kind="question") first; reuse an existing one if the
-     work belongs to that line. Only call ledger_add_question for a genuinely new line.
-  2. ledger_add_diff(..., question_id=<q-id>) when a coherent change is complete.
-  3. ledger_add_experiment(..., question_id=<q-id>, diff_ids=[...]) when the run is launched.
-  4. ledger_update the experiment with status + results as jobs finish or die.
-  5. When the evidence is in, ledger_update the question's conclusion (and status="answered" if it
-     is settled, "parked" if the line is dropped).
+LIFECYCLE
+  1. The user hands the session a research question or an experiment to run.
+  2. SEARCH FIRST: ledger_search with 2-3 phrasings of the topic before doing any work. Read the
+     takeaways of the matching questions -- they are prior findings that should change your plan.
+     Best practice: spawn a background subagent (the Explore agent) to run the searches and report
+     back, so the searching does not eat the main thread's context.
+  3. Find or create the question. Reuse the existing question if the work belongs to that line;
+     ledger_add_question only for a genuinely new line.
+  4. Attach the work as it is produced: ledger_add_diff(question_id=...) per coherent change,
+     ledger_add_experiment(question_id=..., diff_ids=[...]) when a run is launched, and
+     ledger_add_asset for every artifact worth finding again (checkpoint, video, plot, dataset,
+     wandb run, log dir).
+  5. Keep it current: ledger_update the experiment's status + results as jobs finish or die, and
+     the question's conclusion as evidence comes in (status="answered" when settled, "parked" if
+     the line is dropped).
+  6. When a finding stabilizes, distill it into takeaways with
+     ledger_update(add_takeaways=[...]).
+  7. Review status and notes on diffs are the user's, set in the GUI. Never write them.
+
+TAKEAWAYS
+  Takeaways are the ledger's knowledge base and what future agents search against. Each one is a
+  single, short, declarative fact, self-contained enough that an agent with zero context can act on
+  it: name the mechanism/setting and the condition it holds under.
+    good: "A privileged critic collapses on point-cloud obs in in-context PPO; a shared-trunk
+           critic plus LR warmup holds 0.95-0.97 success."
+    good: "Camera envs must be launched with HF_HUB_OFFLINE=1 once the asset cache is warm; the
+           first reset otherwise stalls ~15 min re-resolving textures."
+    bad:  "It worked." / "The fix helped." / "See exp-2026-08-31-..." (no context, not searchable)
+  Takeaways are permanent and append-only via add_takeaways. conclusion is the narrative; a
+  takeaway is the fact extracted from it.
+
+ASSETS
+  {label, location} on any entry. location is a path, URL, wandb link, checkpoint, zarr, video.
+  Attach checkpoints and plots to the experiment that produced them, dataset/paper links to the
+  question. Dedup is on location.
 
 CONVENTIONS
   * One question per research line, not per run. Near-duplicate questions make the dashboard
-    useless -- search before creating.
+    useless -- ledger_search before creating.
   * One ledger_add_diff per coherent change, written when the change is complete, not per file.
     summary is required: say what changed and why, in a couple of sentences an outside reader can
     follow. Do not paste the diff -- the patch is captured for you.
@@ -77,22 +117,23 @@ CONVENTIONS
     no entry at all -- update to done/killed/failed as soon as you know, and put the numbers in
     results (success rate, iterations, what it showed).
   * Job ids, wandb run urls/ids and cluster go on the experiment, not in prose.
-  * Never set status or notes on a diff entry: review is the user's job, in the GUI.
 
 EXAMPLE SEQUENCE
-  1. ledger_add_question(title="Does a shared-trunk critic fix value collapse on PC obs?",
+  1. ledger_search(query="privileged critic value collapse point cloud PPO")
+     -> read the takeaways of any hits before planning
+  2. ledger_add_question(title="Does a shared-trunk critic fix value collapse on PC obs?",
                          summary="Privileged critics collapse on point-cloud observations in "
                                  "in-context PPO. Does sharing the actor trunk fix it?",
                          tags=["rl","in-context"])
      -> q-does-a-shared-trunk-critic-fix-value-collapse-on-pc-obs
-  2. ledger_add_diff(title="Shared-trunk critic for in-context PPO",
+  3. ledger_add_diff(title="Shared-trunk critic for in-context PPO",
                      summary="Critic now shares the actor trunk instead of taking privileged obs; "
                              "privileged critics collapsed on PC obs. Adds critic_design flag.",
                      repo_dir="/home/yandabao/UWLab-patrick-private/.claude/worktrees/incontext",
                      question_id="q-does-a-shared-trunk-critic-fix-value-collapse-on-pc-obs",
                      capture="working", tags=["rl","in-context"])
      -> 2026-08-31-shared-trunk-critic-for-in-context-ppo
-  3. ledger_add_experiment(title="ctx16 PC bias, shared-trunk critic",
+  4. ledger_add_experiment(title="ctx16 PC bias, shared-trunk critic",
                            summary="Two seeds on Tillicum, 16-step context, obs-bias POMDP; tests "
                                    "whether the shared trunk fixes the value collapse.",
                            question_id="q-does-a-shared-trunk-critic-fix-value-collapse-on-pc-obs",
@@ -100,21 +141,29 @@ EXAMPLE SEQUENCE
                            status="running", cluster="tillicum", job_ids=["265935","265937"],
                            wandb=["yandabaocs-university-of-washington/.../265935"])
      -> exp-2026-08-31-ctx16-pc-bias-shared-trunk-critic
-  4. when the runs finish:
+  5. as artifacts appear:
+     ledger_add_asset(id="exp-2026-08-31-ctx16-pc-bias-shared-trunk-critic",
+                      label="ckpt iter 6000", location="/home/yandabao/pulled_ckpts/265935_6000.pt")
+  6. when the runs finish:
      ledger_update(id="exp-2026-08-31-ctx16-pc-bias-shared-trunk-critic", status="done",
                    results="0.95 / 0.97 success at iter ~4k; no value collapse. Killed at 6k.")
-  5. when the question is settled:
+  7. when the question is settled:
      ledger_update(id="q-does-a-shared-trunk-critic-fix-value-collapse-on-pc-obs",
                    status="answered",
                    conclusion="Yes. Shared trunk + LR warmup holds 0.95-0.97 where the privileged "
-                              "critic collapsed within 500 iters.")
+                              "critic collapsed within 500 iters.",
+                   add_takeaways=["In-context PPO on point-cloud obs needs a shared-trunk critic: "
+                                  "a privileged critic collapses within ~500 iters, shared trunk "
+                                  "plus LR warmup holds 0.95-0.97 success."])
 
 TOOLS
   ledger_guide           this text
-  ledger_add_question    open a research line (find-or-create; check ledger_list first)
+  ledger_search          full-text search over questions (takeaways weighted highest), diffs, exps
+  ledger_add_question    open a research line (search first; find-or-create)
   ledger_add_diff        record a code change (captures the patch), linked to a question
   ledger_add_experiment  record a run, linked to a question and diff ids
-  ledger_update          edit an entry / set conclusion / append job ids, wandb, tags, diff ids
+  ledger_add_asset       attach an artifact (checkpoint, video, plot, wandb) to any entry
+  ledger_update          status/results/conclusion, add_takeaways, append job ids, wandb, tags
   ledger_list            browse entries (filter by kind/status/worktree/query)
   ledger_show            full JSON for one entry (+ patch path for diffs)
 """
@@ -131,9 +180,9 @@ TOOLS = [
     {
         "name": "ledger_add_question",
         "description": (
-            "Open a research question — the TOP-LEVEL entity that diffs and experiments hang off. Create ONE "
-            "question per research line and reuse it for everything in that line: call ledger_list(kind="
-            "'question') FIRST and pass the existing id instead of creating a near-duplicate. A question is "
+            "Open a research question — the TOP-LEVEL entity that diffs, experiments, assets and takeaways "
+            "hang off. Create ONE question per research line and reuse it for everything in that line: call "
+            "ledger_search FIRST and pass the existing id instead of creating a near-duplicate. A question is "
             "long-lived (weeks), not per-run. Returns the new question id."
         ),
         "inputSchema": {
@@ -222,9 +271,10 @@ TOOLS = [
         "description": (
             "Update an existing ledger entry. Main uses: move an experiment to done/killed/failed and fill "
             "in results when runs finish -- a stale 'running' is worse than no entry -- and write the "
-            "conclusion (and status) of a question once the evidence is in. Also relinks a diff/experiment "
-            "to a question and appends job ids, wandb runs, tags and diff links. Diff review status and "
-            "notes are set by the user in the GUI and are rejected here."
+            "conclusion (and status) of a question once the evidence is in. Also appends takeaways to a "
+            "question (the permanent, searchable findings), relinks a diff/experiment to a question, and "
+            "appends job ids, wandb runs, tags and diff links. Diff review status and notes are set by the "
+            "user in the GUI and are rejected here."
         ),
         "inputSchema": {
             "type": "object",
@@ -242,6 +292,14 @@ TOOLS = [
                 "question_id": {
                     "type": "string",
                     "description": "diff/experiment only: question to link to; empty string clears the link",
+                },
+                "add_takeaways": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "questions only: short self-contained declarative findings, one fact each, written so "
+                        "an agent with zero context can act on them; appended and deduped"
+                    ),
                 },
                 "add_diff_ids": {"type": "array", "items": {"type": "string"}},
                 "add_job_ids": {"type": "array", "items": {"type": "string"}},
@@ -269,6 +327,42 @@ TOOLS = [
                 "query": {"type": "string", "description": "case-insensitive substring over id/title/summary/tags"},
                 "limit": {"type": "integer", "minimum": 1, "description": "default 20"},
             },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "ledger_add_asset",
+        "description": (
+            "Attach an artifact to any ledger entry so it can be found again: checkpoint, video, plot, "
+            "dataset/zarr, log dir, wandb run url, notes file. Checkpoints and plots belong on the experiment "
+            "that produced them; dataset and paper links on the question. Deduped on location."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "id": {"type": "string", "description": "question, diff or experiment id"},
+                "label": {"type": "string", "description": "short human label, e.g. 'ckpt iter 6000'"},
+                "location": {"type": "string", "description": "path, URL, wandb link, checkpoint, zarr, video"},
+            },
+            "required": ["id", "label", "location"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "ledger_search",
+        "description": (
+            "Search the accumulated research knowledge base — past research questions, their stable "
+            "takeaways, experiments, and diffs. Call before starting new work on a topic and cite what you "
+            "find."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "free text; try 2-3 phrasings of the topic"},
+                "kind": {"type": "string", "enum": ["question", "diff", "experiment"]},
+                "limit": {"type": "integer", "minimum": 1, "description": "default 8"},
+            },
+            "required": ["query"],
             "additionalProperties": False,
         },
     },
@@ -319,6 +413,14 @@ def assert_diffs_exist(root: str, diff_ids: list[str]) -> None:
         assert os.path.exists(os.path.join(diffs_dir, f"{diff_id}.json")), f"unknown diff id: {diff_id}"
 
 
+def question_takeaways(root: str, question_id: str) -> list[str]:
+    questions_dir, _, _, _ = subdirs(root)
+    path = os.path.join(questions_dir, f"{question_id}.json")
+    if not os.path.exists(path):
+        return []
+    return [t for t in (load_entry(path).get("takeaways") or []) if isinstance(t, str)]
+
+
 def tool_guide(args: dict) -> str:
     return GUIDE
 
@@ -343,12 +445,14 @@ def tool_add_question(args: dict) -> str:
         "summary": summary,
         "status": status,
         "conclusion": "",
+        "takeaways": [],
         "tags": as_list(args, "tags"),
+        "assets": [],
         "created": ts,
         "updated": ts,
     }
     write_entry(os.path.join(questions_dir, f"{entry_id}.json"), entry)
-    return entry_id
+    return f"{entry_id}\n\n{SEARCH_DIRECTIVE}"
 
 
 def tool_add_diff(args: dict) -> str:
@@ -392,6 +496,7 @@ def tool_add_diff(args: dict) -> str:
         "status": "unreviewed",
         "notes": "",
         "tags": as_list(args, "tags"),
+        "assets": [],
         "created": ts,
         "updated": ts,
     }
@@ -432,11 +537,19 @@ def tool_add_experiment(args: dict) -> str:
         "wandb": as_list(args, "wandb"),
         "results": "",
         "tags": as_list(args, "tags"),
+        "assets": [],
         "created": ts,
         "updated": ts,
     }
     write_entry(os.path.join(exp_dir, f"{entry_id}.json"), entry)
-    return entry_id
+
+    lines = [entry_id]
+    takeaways = question_takeaways(root, question_id) if question_id else []
+    if takeaways:
+        lines.append("\ntakeaways already on this question:")
+        lines += [f"  - {t}" for t in takeaways]
+    lines.append(f"\n{SEARCH_DIRECTIVE}")
+    return "\n".join(lines)
 
 
 def tool_update(args: dict) -> str:
@@ -492,10 +605,61 @@ def tool_update(args: dict) -> str:
     add_tags = as_list(args, "add_tags")
     if add_tags:
         append_dedup(entry, "tags", add_tags)
+    add_takeaways = as_list(args, "add_takeaways")
+    if add_takeaways:
+        assert kind == "question", "add_takeaways applies to question entries"
+        append_dedup(entry, "takeaways", add_takeaways)
 
     entry["updated"] = now_ts()
     write_entry(path, entry)
     return json.dumps(entry, indent=2)
+
+
+def tool_add_asset(args: dict) -> str:
+    root = ledger_root()
+    entry_id = as_str(args, "id", required=True)
+    label = as_str(args, "label", required=True)
+    location = as_str(args, "location", required=True)
+    path = entry_path(root, entry_id)
+    assert path is not None, f"no ledger entry with id {entry_id}"
+    entry = load_entry(path)
+    add_asset(entry, label, location)
+    entry["updated"] = now_ts()
+    write_entry(path, entry)
+    listing = "\n".join(f"  {a['label']} -> {a['location']}" for a in entry["assets"])
+    return f"{entry_id}: {len(entry['assets'])} asset(s)\n{listing}"
+
+
+def tool_search(args: dict) -> str:
+    root = ledger_root()
+    query = as_str(args, "query", required=True)
+    assert query.strip(), "query must not be empty"
+    kind = as_str(args, "kind")
+    assert kind in (None, "question", "diff", "experiment"), "kind must be 'question', 'diff' or 'experiment'"
+    limit = args.get("limit", 8)
+    assert isinstance(limit, int) and not isinstance(limit, bool), "limit must be an integer"
+    assert limit > 0, "limit must be positive"
+
+    entries = load_all(root)
+    if kind:
+        entries = [e for e in entries if e.get("kind") == kind]
+    hits = search_entries(entries, query, limit)
+    if not hits:
+        return f"(no matches for {query!r}) — nothing recorded on this topic yet; try another phrasing."
+
+    blocks = []
+    for entry, score, snippets in hits:
+        lines = [
+            f"[{score}] {entry.get('id', '')}  {entry.get('kind', '')}/{entry.get('status', '')}",
+            f"  {entry.get('title', '')}",
+        ]
+        takeaways = entry.get("takeaways") or []
+        if entry.get("kind") == "question" and takeaways:
+            lines.append("  takeaways:")
+            lines += [f"    - {t}" for t in takeaways]
+        lines += [f"  … {snippet}" for snippet in snippets]
+        blocks.append("\n".join(lines))
+    return "\n\n".join(blocks)
 
 
 def matches_query(entry: dict, query: str) -> bool:
@@ -576,6 +740,8 @@ HANDLERS = {
     "ledger_add_question": tool_add_question,
     "ledger_add_diff": tool_add_diff,
     "ledger_add_experiment": tool_add_experiment,
+    "ledger_add_asset": tool_add_asset,
+    "ledger_search": tool_search,
     "ledger_update": tool_update,
     "ledger_list": tool_list,
     "ledger_show": tool_show,

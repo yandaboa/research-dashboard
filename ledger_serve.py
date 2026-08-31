@@ -15,7 +15,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ledger import atomic_write, ledger_root, now_ts, statuses_for, subdirs  # noqa: E402
 
 VIEWER_HTML = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ledger_viewer.html")
-EDITABLE_FIELDS = ("status", "notes", "results", "conclusion", "summary", "title")
+EDITABLE_FIELDS = ("status", "notes", "results", "conclusion", "summary", "title", "takeaways")
+LIST_FIELDS = ("takeaways",)  # edited as one-per-line text in the GUI, posted as a list
 
 
 def load_dir(path: str) -> list[dict]:
@@ -134,6 +135,11 @@ class Handler(BaseHTTPRequestHandler):
             if key not in EDITABLE_FIELDS:
                 self._send_json(400, {"error": f"field not editable: {key}"})
                 return
+            if key in LIST_FIELDS:
+                if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+                    self._send_json(400, {"error": f"field {key} must be a list of strings"})
+                    return
+                continue
             if not isinstance(value, str):
                 self._send_json(400, {"error": f"field {key} must be a string"})
                 return
