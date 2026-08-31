@@ -14,14 +14,17 @@ DEFAULT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 
 DIFF_STATUSES = ("unreviewed", "questionable", "known_good")
 EXP_STATUSES = ("planned", "running", "done", "killed", "failed")
+QUESTION_STATUSES = ("open", "answered", "parked")
 
 
 def ledger_root() -> str:
     return os.environ.get("UWLAB_LEDGER_ROOT", DEFAULT_ROOT)
 
 
-def subdirs(root: str) -> tuple[str, str, str]:
+def subdirs(root: str) -> tuple[str, str, str, str]:
+    """(questions, diffs, experiments, patches) — entry dirs first, patches last."""
     return (
+        os.path.join(root, "questions"),
         os.path.join(root, "diffs"),
         os.path.join(root, "experiments"),
         os.path.join(root, "patches"),
@@ -88,8 +91,7 @@ def capture_diff(mode: str, cwd: str | None = None) -> tuple[str, list[str]]:
 
 
 def entry_path(root: str, entry_id: str) -> str | None:
-    diffs_dir, exp_dir, _ = subdirs(root)
-    for d in (diffs_dir, exp_dir):
+    for d in subdirs(root)[:3]:
         path = os.path.join(d, f"{entry_id}.json")
         if os.path.exists(path):
             return path
@@ -122,14 +124,46 @@ def load_entry(path: str) -> dict:
 
 
 def statuses_for(kind: str) -> tuple[str, ...]:
+    if kind == "question":
+        return QUESTION_STATUSES
     return DIFF_STATUSES if kind == "diff" else EXP_STATUSES
+
+
+def assert_question_exists(root: str, question_id: str) -> None:
+    questions_dir, _, _, _ = subdirs(root)
+    assert os.path.exists(os.path.join(questions_dir, f"{question_id}.json")), f"unknown question id: {question_id}"
+
+
+def cmd_add_question(args: argparse.Namespace) -> None:
+    root = ledger_root()
+    ensure_root(root)
+    assert args.status in QUESTION_STATUSES, f"status must be one of {QUESTION_STATUSES}"
+    questions_dir, _, _, _ = subdirs(root)
+
+    entry_id = unique_id(root, args.id or f"q-{slugify(args.title)}")
+    ts = now_ts()
+    entry = {
+        "kind": "question",
+        "id": entry_id,
+        "title": args.title,
+        "summary": args.summary or "",
+        "status": args.status,
+        "conclusion": "",
+        "tags": split_list(args.tags),
+        "created": ts,
+        "updated": ts,
+    }
+    write_entry(os.path.join(questions_dir, f"{entry_id}.json"), entry)
+    print(entry_id)
 
 
 def cmd_add_diff(args: argparse.Namespace) -> None:
     root = ledger_root()
     ensure_root(root)
     assert args.status in DIFF_STATUSES, f"status must be one of {DIFF_STATUSES}"
-    diffs_dir, _, patches_dir = subdirs(root)
+    _, diffs_dir, _, _ = subdirs(root)
+    if args.question:
+        assert_question_exists(root, args.question)
 
     entry_id = args.id or f"{datetime.now().strftime('%Y-%m-%d')}-{slugify(args.title)}"
     entry_id = unique_id(root, entry_id)
@@ -153,6 +187,7 @@ def cmd_add_diff(args: argparse.Namespace) -> None:
         "id": entry_id,
         "title": args.title,
         "summary": args.summary or "",
+        "question_id": args.question or None,
         "repo": repo,
         "worktree": worktree,
         "branch": branch,
@@ -173,7 +208,9 @@ def cmd_add_exp(args: argparse.Namespace) -> None:
     root = ledger_root()
     ensure_root(root)
     assert args.status in EXP_STATUSES, f"status must be one of {EXP_STATUSES}"
-    diffs_dir, exp_dir, _ = subdirs(root)
+    _, diffs_dir, exp_dir, _ = subdirs(root)
+    if args.question:
+        assert_question_exists(root, args.question)
 
     diff_ids = split_list(args.diffs)
     for diff_id in diff_ids:
@@ -188,6 +225,7 @@ def cmd_add_exp(args: argparse.Namespace) -> None:
         "id": entry_id,
         "title": args.title,
         "summary": args.summary or "",
+        "question_id": args.question or None,
         "diff_ids": diff_ids,
         "status": args.status,
         "cluster": args.cluster or "",
@@ -231,9 +269,17 @@ def cmd_update(args: argparse.Namespace) -> None:
     if args.results is not None:
         assert kind == "experiment", "--results applies to experiment entries"
         entry["results"] = args.results
+    if args.conclusion is not None:
+        assert kind == "question", "--conclusion applies to question entries"
+        entry["conclusion"] = args.conclusion
+    if args.question is not None:
+        assert kind in ("diff", "experiment"), "--question applies to diff/experiment entries"
+        if args.question:
+            assert_question_exists(root, args.question)
+        entry["question_id"] = args.question or None
     if args.add_diffs:
         assert kind == "experiment", "--add-diffs applies to experiment entries"
-        diffs_dir, _, _ = subdirs(root)
+        _, diffs_dir, _, _ = subdirs(root)
         new_ids = split_list(args.add_diffs)
         for diff_id in new_ids:
             assert os.path.exists(os.path.join(diffs_dir, f"{diff_id}.json")), f"unknown diff id: {diff_id}"
@@ -267,7 +313,7 @@ def cmd_set_status(args: argparse.Namespace) -> None:
 
 def load_all(root: str) -> list[dict]:
     entries = []
-    for d in subdirs(root)[:2]:
+    for d in subdirs(root)[:3]:
         if not os.path.isdir(d):
             continue
         for name in sorted(os.listdir(d)):
@@ -278,6 +324,14 @@ def load_all(root: str) -> list[dict]:
             except (OSError, json.JSONDecodeError) as exc:
                 print(f"warning: skipping {name}: {exc}", file=sys.stderr)
     return entries
+
+
+def where_column(entry: dict) -> str:
+    kind = entry.get("kind", "diff")
+    if kind == "question":
+        return "-"
+    where = entry.get("worktree") if kind == "diff" else entry.get("cluster")
+    return where or "-"
 
 
 def cmd_list(args: argparse.Namespace) -> None:
@@ -294,14 +348,14 @@ def cmd_list(args: argparse.Namespace) -> None:
 
     rows = []
     for e in entries:
-        where = e.get("worktree") if e.get("kind") == "diff" else e.get("cluster")
+        where = where_column(e)
         title = e.get("title", "")
         rows.append(
             (
                 e.get("id", ""),
                 e.get("kind", "")[:4],
                 e.get("status", ""),
-                where or "-",
+                where,
                 title if len(title) <= 48 else title[:47] + "…",
                 e.get("updated", ""),
             )
@@ -322,11 +376,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Central experiment/diff ledger.")
     sub = parser.add_subparsers(dest="command", required=True)
 
+    p = sub.add_parser("add-question", help="record a research question")
+    p.add_argument("--title", required=True)
+    p.add_argument("--summary", default="")
+    p.add_argument("--id")
+    p.add_argument("--status", default="open")
+    p.add_argument("--tags")
+    p.set_defaults(func=cmd_add_question)
+
     p = sub.add_parser("add-diff", help="record a code change")
     p.add_argument("--title", required=True)
     p.add_argument("--summary", default="")
     p.add_argument("--id")
     p.add_argument("--status", default="unreviewed")
+    p.add_argument("--question", help="research question id this change belongs to")
     p.add_argument("--tags")
     p.add_argument("--commits")
     p.add_argument("--files", help="comma-separated file list, used when --capture is absent")
@@ -340,6 +403,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--id")
     p.add_argument("--diffs")
     p.add_argument("--status", default="planned")
+    p.add_argument("--question", help="research question id this run belongs to")
     p.add_argument("--cluster")
     p.add_argument("--jobs")
     p.add_argument("--wandb")
@@ -353,6 +417,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--summary")
     p.add_argument("--results")
     p.add_argument("--notes")
+    p.add_argument("--conclusion", help="questions only: the evolving answer")
+    p.add_argument("--question", help="diff/experiment only: question id, empty string clears the link")
     p.add_argument("--add-diffs")
     p.add_argument("--add-jobs")
     p.add_argument("--add-wandb")
@@ -365,7 +431,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_set_status)
 
     p = sub.add_parser("list", help="compact table of entries")
-    p.add_argument("--kind", choices=["diff", "experiment"])
+    p.add_argument("--kind", choices=["question", "diff", "experiment"])
     p.add_argument("--status")
     p.set_defaults(func=cmd_list)
 

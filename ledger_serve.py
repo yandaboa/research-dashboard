@@ -12,10 +12,10 @@ from urllib.parse import unquote, urlparse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from ledger import DIFF_STATUSES, EXP_STATUSES, atomic_write, ledger_root, now_ts, subdirs  # noqa: E402
+from ledger import atomic_write, ledger_root, now_ts, statuses_for, subdirs  # noqa: E402
 
 VIEWER_HTML = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ledger_viewer.html")
-EDITABLE_FIELDS = ("status", "notes", "results", "summary", "title")
+EDITABLE_FIELDS = ("status", "notes", "results", "conclusion", "summary", "title")
 
 
 def load_dir(path: str) -> list[dict]:
@@ -34,8 +34,7 @@ def load_dir(path: str) -> list[dict]:
 
 
 def find_entry(root: str, entry_id: str) -> tuple[str, dict] | tuple[None, None]:
-    diffs_dir, exp_dir, _ = subdirs(root)
-    for d in (diffs_dir, exp_dir):
+    for d in subdirs(root)[:3]:
         path = os.path.join(d, f"{entry_id}.json")
         if os.path.exists(path):
             try:
@@ -78,8 +77,9 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/data":
-            diffs_dir, exp_dir, _ = subdirs(self.root)
+            questions_dir, diffs_dir, exp_dir, _ = subdirs(self.root)
             payload = {
+                "questions": load_dir(questions_dir),
                 "diffs": load_dir(diffs_dir),
                 "experiments": load_dir(exp_dir),
                 "generated": now_ts(),
@@ -129,7 +129,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         kind = entry.get("kind", "diff")
-        allowed_status = DIFF_STATUSES if kind == "diff" else EXP_STATUSES
+        allowed_status = statuses_for(kind)
         for key, value in fields.items():
             if key not in EDITABLE_FIELDS:
                 self._send_json(400, {"error": f"field not editable: {key}"})
