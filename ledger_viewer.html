@@ -42,13 +42,14 @@
   }
 
   * { box-sizing: border-box; }
-  html, body { margin: 0; padding: 0; }
+  html, body { margin: 0; padding: 0; height: 100%; }
   body {
     background: var(--paper);
     color: var(--ink);
     font-family: var(--sans);
     font-size: 14px;
     line-height: 1.55;
+    overflow: hidden;
     -webkit-font-smoothing: antialiased;
   }
   code, pre, .mono { font-family: var(--mono); }
@@ -63,26 +64,45 @@
     color: var(--muted);
   }
 
-  header.top {
-    position: sticky;
-    top: 0;
-    z-index: 40;
+  /* ---- two-pane shell ---- */
+  .app { display: flex; height: 100%; align-items: stretch; }
+  .side {
+    width: 312px;
+    flex: none;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
     background: var(--paper);
-    border-bottom: 1px solid var(--rule);
+    border-right: 1px solid var(--rule);
   }
-  .top-inner { max-width: 880px; margin: 0 auto; padding: 14px 24px 11px; }
-  .top-row { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
+  .sidehead { padding: 14px 15px 11px; border-bottom: 1px solid var(--rule); flex: none; }
+  .siderow { display: flex; align-items: center; gap: 8px; margin-top: 9px; }
+  .siderow .stamp { white-space: normal; font-size: 10px; line-height: 1.35; }
+  nav.nav { flex: 1; min-height: 0; overflow-y: auto; padding: 5px 0 40px; }
+  main.detail { flex: 1; min-width: 0; overflow-y: auto; }
+  main.detail.feedmode { overflow: hidden; }
+  .detailinner { max-width: 880px; margin: 0 auto; padding: 26px 26px 120px; }
+  main.detail.feedmode .detailinner {
+    max-width: 1120px;
+    height: 100%;
+    padding: 22px 26px 16px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
   .wordmark {
     font-family: var(--serif);
     font-weight: 400;
-    font-size: 21px;
-    line-height: 1.1;
+    font-size: 17px;
+    line-height: 1.15;
     letter-spacing: -0.01em;
     white-space: nowrap;
   }
   .search {
-    flex: 1 1 220px;
-    min-width: 170px;
+    display: block;
+    width: 100%;
+    margin-top: 8px;
     padding: 4px 8px;
     border: 1px solid var(--edge-soft);
     border-radius: 3px;
@@ -108,9 +128,9 @@
   .btn.ghost { background: transparent; }
   .btn.ghost:hover { background: var(--paper-hover); }
 
-  .filters { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; margin-top: 10px; }
-  .filters .grouplabel { margin: 0 3px 0 0; }
-  .filters .grouplabel:not(:first-child) { margin-left: 10px; }
+  .filters { margin-top: 9px; }
+  .fgroup { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; margin-top: 5px; }
+  .grouplabel { margin: 0 3px 0 0; flex: none; }
   .chip {
     display: inline-flex;
     align-items: center;
@@ -151,9 +171,89 @@
   }
   .flash { animation: flashfade 1.6s ease-out; }
 
-  main { max-width: 880px; margin: 0 auto; padding: 26px 24px 140px; }
+  /* ---- question navigation ---- */
+  .navitem {
+    display: block;
+    width: 100%;
+    text-align: left;
+    background: none;
+    border: none;
+    border-left: 2px solid transparent;
+    padding: 7px 14px 8px 13px;
+  }
+  .navitem:hover { background: var(--paper-hover); }
+  .navitem.on { background: var(--paper-hover); border-left-color: var(--gold); }
+  .navitem.muted .navtitle { color: var(--muted); }
+  .navhead { display: flex; align-items: flex-start; gap: 7px; }
+  .navhead .dot { margin-top: 6px; }
+  .navglyph { flex: none; width: 6px; font-size: 11px; line-height: 1.35; color: var(--muted); }
+  .navtitle {
+    flex: 1;
+    min-width: 0;
+    font-size: 13px;
+    line-height: 1.35;
+    overflow-wrap: anywhere;
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .navcount {
+    margin: 1px 0 0 13px;
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .navrule { height: 1px; background: var(--rule); margin: 6px 14px; }
+  .navnone { color: var(--muted); font-size: 12px; font-style: italic; padding: 10px 15px; }
 
-  section.q { margin: 0 0 46px; scroll-margin-top: 130px; }
+  /* ---- feed overview (cropped, never scrolls) ---- */
+  .feedgrid { display: flex; gap: 34px; flex: 1; min-height: 0; overflow: hidden; }
+  .feedcol { flex: 1; min-width: 0; overflow: hidden; }
+  .feeditem {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    width: 100%;
+    text-align: left;
+    background: none;
+    border: none;
+    border-bottom: 1px solid var(--rule);
+    padding: 4px 4px 5px;
+  }
+  .feeditem:hover { background: var(--paper-hover); }
+  .fititle {
+    flex: 0 1 auto;
+    max-width: 62%;
+    font-size: 13px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .fisnip {
+    flex: 1 1 auto;
+    min-width: 0;
+    color: var(--muted);
+    font-size: 12px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .fitime {
+    flex: none;
+    margin-left: auto;
+    padding-left: 8px;
+    font-family: var(--mono);
+    font-size: 10.5px;
+    color: var(--muted);
+  }
+  .feednote { flex: none; margin-top: 12px; color: var(--muted); font-size: 11.5px; }
+
+  section.q { margin: 0 0 46px; scroll-margin-top: 18px; }
   .qhead { display: flex; align-items: flex-start; gap: 10px; position: relative; }
   .chev {
     background: none;
@@ -267,7 +367,7 @@
     padding: 10px 10px 11px;
     margin: 0 -10px;
     border-bottom: 1px solid var(--rule);
-    scroll-margin-top: 140px;
+    scroll-margin-top: 24px;
   }
   .row:hover { background: var(--paper-hover); }
   .rowhead { display: flex; align-items: baseline; gap: 9px; }
@@ -413,21 +513,35 @@
     z-index: 90;
   }
   .toast.err { color: #8f3c34; border-color: #a6473e; }
+
+  @media (max-width: 800px) {
+    html, body { height: auto; }
+    body { overflow: auto; }
+    .app { flex-direction: column; height: auto; }
+    .side { width: auto; border-right: none; border-bottom: 1px solid var(--rule); max-height: 48vh; }
+    main.detail, main.detail.feedmode { overflow: visible; }
+    main.detail.feedmode .detailinner { height: auto; overflow: visible; }
+    .feedgrid { flex-direction: column; gap: 18px; overflow: visible; }
+    .feedcol { overflow: visible; }
+  }
 </style>
 </head>
 <body>
-<header class="top">
-  <div class="top-inner">
-    <div class="top-row">
+<div class="app">
+  <aside class="side">
+    <div class="sidehead">
       <div class="wordmark">Research Dashboard</div>
       <input id="search" class="search" type="search" placeholder="search questions, diffs, runs…   ( / )" />
-      <button id="refresh" class="btn ghost" title="reload from disk">refresh</button>
-      <span id="stamp" class="stamp">loading…</span>
+      <div class="filters" id="filters"></div>
+      <div class="siderow">
+        <button id="refresh" class="btn ghost" title="reload from disk">refresh</button>
+        <span id="stamp" class="stamp">loading…</span>
+      </div>
     </div>
-    <div class="filters" id="filters"></div>
-  </div>
-</header>
-<main id="feed"></main>
+    <nav class="nav" id="nav"></nav>
+  </aside>
+  <main class="detail" id="detail"></main>
+</div>
 <script>
 "use strict";
 
@@ -455,6 +569,9 @@ for (const kind of Object.keys(STATUS_DEFS)) {
   for (const def of STATUS_DEFS[kind]) LABEL_OF[kind + ":" + def.key] = def.label;
 }
 
+const UNASSIGNED = "__unassigned__";
+const FEED_LIMIT = 20;
+
 const state = {
   questions: [],
   diffs: [],
@@ -466,10 +583,12 @@ const state = {
   openFiles: new Set(),
   collapsed: new Set(),
   editing: null,
+  selected: null, // null = feed overview, else question id or UNASSIGNED
   error: "",
 };
 
-const feedEl = document.getElementById("feed");
+const detailEl = document.getElementById("detail");
+const navEl = document.getElementById("nav");
 const stampEl = document.getElementById("stamp");
 const filtersEl = document.getElementById("filters");
 const searchEl = document.getElementById("search");
@@ -489,9 +608,23 @@ function statusClass(entry) {
 function qidOf(entry) {
   return entry.question_id || null;
 }
+function titleOf(entry) {
+  return (entry && entry.title) || "untitled";
+}
 function fmtStamp(iso) {
   if (!iso) return "";
   return String(iso).replace("T", " ").slice(0, 16);
+}
+function relStamp(iso) {
+  if (!iso) return "";
+  const then = Date.parse(String(iso));
+  if (Number.isNaN(then)) return fmtStamp(iso).slice(0, 10);
+  const secs = (Date.now() - then) / 1000;
+  if (secs < 90) return "now";
+  if (secs < 3600) return Math.round(secs / 60) + "m";
+  if (secs < 86400) return Math.round(secs / 3600) + "h";
+  if (secs < 86400 * 14) return Math.round(secs / 86400) + "d";
+  return fmtStamp(iso).slice(0, 10);
 }
 function firstLine(text) {
   const line = String(text || "").split("\n").find((l) => l.trim());
@@ -503,6 +636,9 @@ function listField(entry, field) {
 }
 function assetsOf(entry) {
   return Array.isArray(entry.assets) ? entry.assets.filter((a) => a && a.location) : [];
+}
+function plural(n, word) {
+  return n + " " + word + (n === 1 ? "" : "s");
 }
 
 async function api(path, opts) {
@@ -585,9 +721,50 @@ function childrenOf(qid) {
   };
 }
 
+function looseChildren() {
+  const known = new Set(state.questions.map((q) => q.id));
+  const loose = (entry) => !known.has(qidOf(entry) || "");
+  return {
+    diffs: state.diffs.filter((d) => loose(d) && passesStatus(d) && matchesSearch(d)),
+    exps: state.experiments.filter((e) => loose(e) && passesStatus(e) && matchesSearch(e)),
+  };
+}
+
+function questionKeyOf(entry) {
+  const qid = entry ? qidOf(entry) : null;
+  return qid && state.byId.has(qid) ? qid : UNASSIGNED;
+}
+
 function anyFilterActive() {
   return state.filters.question.size || state.filters.diff.size || state.filters.experiment.size;
 }
+
+// ---- selection / hash routing -------------------------------------------------
+
+function hashKey() {
+  const raw = decodeURIComponent(String(location.hash || "").replace(/^#/, "")).trim();
+  if (!raw) return null;
+  return raw === "unassigned" ? UNASSIGNED : raw;
+}
+function hashFor(key) {
+  if (!key) return "";
+  return key === UNASSIGNED ? "#unassigned" : "#" + encodeURIComponent(key);
+}
+function setSelected(key) {
+  state.selected = key || null;
+  const want = hashFor(state.selected);
+  if (String(location.hash || "") !== want) {
+    if (want) location.hash = want;
+    else history.replaceState(null, "", location.pathname + location.search);
+  }
+  render();
+}
+window.addEventListener("hashchange", () => {
+  const key = hashKey();
+  if (key === state.selected) return;
+  state.selected = key;
+  render();
+});
 
 function renderFilters() {
   filtersEl.textContent = "";
@@ -597,7 +774,8 @@ function renderFilters() {
     counts.set(e.kind + ":" + e.status, (counts.get(e.kind + ":" + e.status) || 0) + 1);
   }
   const group = (label, kind) => {
-    filtersEl.appendChild(el("span", "label grouplabel", label));
+    const row = el("div", "fgroup");
+    row.appendChild(el("span", "label grouplabel", label));
     const set = state.filters[kind];
     for (const def of STATUS_DEFS[kind]) {
       const btn = el("button", "chip " + "st-" + def.key + (set.has(def.key) ? " on" : ""));
@@ -609,15 +787,16 @@ function renderFilters() {
         else set.add(def.key);
         render();
       };
-      filtersEl.appendChild(btn);
+      row.appendChild(btn);
     }
+    filtersEl.appendChild(row);
   };
   group("questions", "question");
   group("diffs", "diff");
   group("runs", "experiment");
   if (anyFilterActive() || state.search) {
+    const row = el("div", "fgroup");
     const clear = el("button", "btn ghost", "clear");
-    clear.style.marginLeft = "8px";
     clear.onclick = () => {
       state.filters.question.clear();
       state.filters.diff.clear();
@@ -626,7 +805,8 @@ function renderFilters() {
       searchEl.value = "";
       render();
     };
-    filtersEl.appendChild(clear);
+    row.appendChild(clear);
+    filtersEl.appendChild(row);
   }
 }
 
@@ -703,15 +883,13 @@ async function pushUpdate(id, fields, onError) {
 
 function scrollToEntry(id) {
   const entry = state.byId.get(id);
-  const qid = entry ? qidOf(entry) : null;
-  const key = qid && state.byId.has(qid) ? qid : "__unassigned__";
-  if (state.collapsed.has(key)) {
-    state.collapsed.delete(key);
-    render();
-  }
+  const key = questionKeyOf(entry);
+  if (state.collapsed.has(key)) state.collapsed.delete(key);
+  if (state.selected !== key) setSelected(key);
+  else render();
   const node = document.getElementById("row-" + id);
   if (!node) {
-    toast(id + " is hidden by the current filters", true);
+    toast("that entry is hidden by the current filters", true);
     return;
   }
   node.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -720,14 +898,15 @@ function scrollToEntry(id) {
   node.classList.add("flash");
 }
 
-function refChip(entry, fallbackId) {
+function refChip(entry) {
   const btn = el("button", "ref");
   btn.appendChild(el("span", "dot " + (entry ? statusClass(entry) : "st-unreviewed")));
-  btn.appendChild(el("span", "txt", entry ? entry.title || entry.id : fallbackId + " (missing)"));
-  btn.title = entry ? entry.id + " — " + labelOf(entry) : fallbackId;
+  btn.appendChild(el("span", "txt", entry ? titleOf(entry) : "missing entry"));
+  btn.title = entry ? labelOf(entry) : "referenced entry is missing";
+  if (!entry) return btn;
   btn.onclick = (ev) => {
     ev.stopPropagation();
-    scrollToEntry(entry ? entry.id : fallbackId);
+    scrollToEntry(entry.id);
   };
   return btn;
 }
@@ -871,7 +1050,7 @@ function diffRow(entry) {
 
   const head = el("div", "rowhead");
   head.appendChild(statusTag(entry, true));
-  head.appendChild(el("span", "rtitle", entry.title || entry.id));
+  head.appendChild(el("span", "rtitle", titleOf(entry)));
   row.appendChild(head);
 
   const meta = el("div", "rowmeta");
@@ -879,14 +1058,14 @@ function diffRow(entry) {
   if (where) metaText(meta, where + (entry.branch ? " · " + entry.branch : ""));
   for (const c of entry.commits || []) {
     if (meta.childNodes.length) metaSep(meta);
-    metaText(meta, c);
+    metaText(meta, String(c).slice(0, 7));
   }
   for (const t of entry.tags || []) {
     if (meta.childNodes.length) metaSep(meta);
     metaText(meta, "#" + t);
   }
   if (meta.childNodes.length) metaSep(meta);
-  metaText(meta, entry.id + " · " + fmtStamp(entry.updated));
+  metaText(meta, fmtStamp(entry.updated));
   row.appendChild(meta);
 
   if (entry.summary) row.appendChild(el("div", "rsummary", entry.summary));
@@ -925,7 +1104,7 @@ function diffRow(entry) {
   if (linked.length) {
     const line = el("div", "rowline");
     line.appendChild(el("span", "label", "experiments"));
-    for (const exp of linked) line.appendChild(refChip(exp, exp.id));
+    for (const exp of linked) line.appendChild(refChip(exp));
     row.appendChild(line);
   }
 
@@ -938,16 +1117,16 @@ function expRow(entry) {
   row.id = "row-" + entry.id;
 
   const head = el("div", "rowhead");
-  head.appendChild(statusTag(entry, true));
-  head.appendChild(el("span", "rtitle", entry.title || entry.id));
+  const tag = statusTag(entry, true);
+  const jobs = (entry.job_ids || []).filter(Boolean);
+  // job ids are tooltip-only: never visible text
+  if (jobs.length) tag.title = "job " + jobs.join(", ") + " — click to change status";
+  head.appendChild(tag);
+  head.appendChild(el("span", "rtitle", titleOf(entry)));
   row.appendChild(head);
 
   const meta = el("div", "rowmeta");
   if (entry.cluster) metaText(meta, entry.cluster);
-  for (const j of entry.job_ids || []) {
-    if (meta.childNodes.length) metaSep(meta);
-    metaText(meta, "job " + j);
-  }
   (entry.wandb || []).forEach((url, i) => {
     if (meta.childNodes.length) metaSep(meta);
     const a = document.createElement("a");
@@ -955,7 +1134,7 @@ function expRow(entry) {
     a.target = "_blank";
     a.rel = "noreferrer";
     a.textContent = "wandb" + ((entry.wandb || []).length > 1 ? " " + (i + 1) : "") + " ↗";
-    a.title = url;
+    a.title = url + (jobs.length ? "  (job " + jobs.join(", ") + ")" : "");
     meta.appendChild(a);
   });
   for (const t of entry.tags || []) {
@@ -963,7 +1142,7 @@ function expRow(entry) {
     metaText(meta, "#" + t);
   }
   if (meta.childNodes.length) metaSep(meta);
-  metaText(meta, entry.id + " · " + fmtStamp(entry.updated));
+  metaText(meta, fmtStamp(entry.updated));
   row.appendChild(meta);
 
   if (entry.summary) row.appendChild(el("div", "rsummary", entry.summary));
@@ -974,7 +1153,7 @@ function expRow(entry) {
   if (diffIds.length) {
     const line = el("div", "rowline");
     line.appendChild(el("span", "label", "diffs"));
-    for (const id of diffIds) line.appendChild(refChip(state.byId.get(id), id));
+    for (const id of diffIds) line.appendChild(refChip(state.byId.get(id)));
     row.appendChild(line);
   }
 
@@ -1009,10 +1188,10 @@ function questionSection(question, diffs, exps) {
   head.appendChild(chev);
 
   const main = el("div", "qmain");
-  main.appendChild(el("h2", "qtitle", question.title || question.id));
+  main.appendChild(el("h2", "qtitle", question.title || "untitled question"));
   const line = el("div", "qline");
   line.appendChild(statusTag(question, true));
-  line.appendChild(el("span", "qid", question.id + " · " + fmtStamp(question.updated)));
+  line.appendChild(el("span", "qid", "updated " + fmtStamp(question.updated)));
   for (const t of question.tags || []) line.appendChild(el("span", "tag", "#" + t));
   main.appendChild(line);
   head.appendChild(main);
@@ -1047,12 +1226,12 @@ function unassignedSection(diffs, exps) {
   const section = el("section", "q");
   section.id = "q-section-unassigned";
   const head = el("div", "qhead");
-  const collapsed = state.collapsed.has("__unassigned__");
+  const collapsed = state.collapsed.has(UNASSIGNED);
   const chev = el("button", "chev" + (collapsed ? "" : " open"));
   chev.appendChild(el("span", "car", "▸"));
   chev.onclick = () => {
-    if (collapsed) state.collapsed.delete("__unassigned__");
-    else state.collapsed.add("__unassigned__");
+    if (collapsed) state.collapsed.delete(UNASSIGNED);
+    else state.collapsed.add(UNASSIGNED);
     render();
   };
   head.appendChild(chev);
@@ -1071,6 +1250,7 @@ function unassignedSection(diffs, exps) {
   }
   if (diffs.length) section.appendChild(subList("diffs", diffs, diffRow));
   if (exps.length) section.appendChild(subList("experiments", exps, expRow));
+  if (!diffs.length && !exps.length) section.appendChild(el("div", "none", "nothing unassigned right now"));
   return section;
 }
 
@@ -1078,8 +1258,8 @@ async function openPatch(entry) {
   const bg = el("div", "modalbg");
   const modal = el("div", "modal");
   const head = el("div", "modalhead");
-  head.appendChild(el("span", "t", entry.title || entry.id));
-  head.appendChild(el("span", "stamp", entry.patch || ""));
+  head.appendChild(el("span", "t", titleOf(entry)));
+  head.appendChild(el("span", "stamp", fmtStamp(entry.updated)));
   const dismiss = () => {
     bg.remove();
     document.removeEventListener("keydown", onKey);
@@ -1118,6 +1298,121 @@ async function openPatch(entry) {
   }
 }
 
+// ---- left pane: question navigation -------------------------------------------
+
+function navItem(key, opts) {
+  const item = el("button", "navitem" + (state.selected === key ? " on" : "") + (opts.muted ? " muted" : ""));
+  const head = el("div", "navhead");
+  if (opts.glyph) head.appendChild(el("span", "navglyph", opts.glyph));
+  else head.appendChild(el("span", "dot " + opts.dotClass));
+  head.appendChild(el("div", "navtitle", opts.title));
+  item.appendChild(head);
+  if (opts.count) item.appendChild(el("div", "navcount", opts.count));
+  item.onclick = () => setSelected(key);
+  return item;
+}
+
+function renderNav() {
+  navEl.textContent = "";
+  navEl.appendChild(
+    navItem(null, { glyph: "⌂", title: "feed", muted: !!state.selected })
+  );
+  navEl.appendChild(el("div", "navrule"));
+
+  let shown = 0;
+  for (const question of state.questions) {
+    if (!passesStatus(question)) continue;
+    const kids = childrenOf(question.id);
+    const hit =
+      matchesSearch(question) || kids.diffs.some(matchesSearch) || kids.exps.some(matchesSearch);
+    if (!hit) continue;
+    const nDiffs = kids.diffs.filter(passesStatus).length;
+    const nExps = kids.exps.filter(passesStatus).length;
+    const nTakeaways = listField(question, "takeaways").length;
+    const bits = [plural(nDiffs, "diff"), plural(nExps, "run")];
+    if (nTakeaways) bits.push(plural(nTakeaways, "takeaway"));
+    navEl.appendChild(
+      navItem(question.id, {
+        dotClass: statusClass(question),
+        title: question.title || "untitled question",
+        count: bits.join(" · "),
+      })
+    );
+    shown++;
+  }
+
+  const loose = looseChildren();
+  if (loose.diffs.length || loose.exps.length) {
+    navEl.appendChild(
+      navItem(UNASSIGNED, {
+        dotClass: "st-unreviewed",
+        title: "unassigned",
+        count: plural(loose.diffs.length, "diff") + " · " + plural(loose.exps.length, "run"),
+        muted: true,
+      })
+    );
+    shown++;
+  }
+
+  if (!shown) {
+    navEl.appendChild(
+      el("div", "navnone", state.byId.size ? "no questions match" : "the ledger is empty")
+    );
+  }
+}
+
+// ---- right pane: feed overview ------------------------------------------------
+
+function feedItem(entry, withSnippet) {
+  const item = el("button", "feeditem");
+  item.appendChild(el("span", "dot " + statusClass(entry)));
+  item.appendChild(el("span", "fititle", titleOf(entry)));
+  if (withSnippet) {
+    const snip = firstLine(entry.results) || firstLine(entry.summary);
+    if (snip) item.appendChild(el("span", "fisnip", snip));
+  }
+  item.appendChild(el("span", "fitime", relStamp(entry.updated)));
+  item.title = labelOf(entry) + " · " + fmtStamp(entry.updated);
+  item.onclick = () => scrollToEntry(entry.id);
+  return item;
+}
+
+function feedColumn(label, entries, withSnippet) {
+  const col = el("div", "feedcol");
+  const head = el("div", "sublabel");
+  head.appendChild(el("span", "label", label));
+  head.appendChild(el("span", "n", String(entries.length)));
+  col.appendChild(head);
+  if (!entries.length) {
+    col.appendChild(el("div", "none", "nothing here yet"));
+    return col;
+  }
+  for (const entry of entries.slice(0, FEED_LIMIT)) col.appendChild(feedItem(entry, withSnippet));
+  return col;
+}
+
+function feedView(host) {
+  const visible = (entry) => passesStatus(entry) && matchesSearch(entry);
+  const exps = state.experiments.filter(visible);
+  const diffs = state.diffs.filter(visible);
+  if (!exps.length && !diffs.length) {
+    const empty = el("div", "empty");
+    empty.appendChild(el("span", "glyph", "∅"));
+    empty.appendChild(
+      el("span", null, state.byId.size ? "nothing matches the current filters." : "the ledger is empty.")
+    );
+    host.appendChild(empty);
+    return;
+  }
+  const grid = el("div", "feedgrid");
+  grid.appendChild(feedColumn("recent experiments", exps, true));
+  grid.appendChild(feedColumn("recent diffs", diffs, false));
+  host.appendChild(grid);
+  host.appendChild(el("div", "feednote", "select a question on the left for detail"));
+}
+
+// ---- render -------------------------------------------------------------------
+
 function render() {
   renderFilters();
   const total = state.byId.size;
@@ -1125,38 +1420,38 @@ function render() {
     ? "error: " + state.error
     : "updated " + (fmtStamp(state.generated) || "—") + " · " + total + " entries";
 
-  const scrollY = window.scrollY;
-  feedEl.textContent = "";
-  let sections = 0;
+  const navScroll = navEl.scrollTop;
+  const detailScroll = detailEl.scrollTop;
 
-  for (const question of state.questions) {
-    if (!passesStatus(question)) continue;
+  renderNav();
+
+  detailEl.textContent = "";
+  const inner = el("div", "detailinner");
+  detailEl.appendChild(inner);
+
+  const question = state.selected && state.selected !== UNASSIGNED ? state.byId.get(state.selected) : null;
+  const isFeed = !state.selected;
+  detailEl.classList.toggle("feedmode", isFeed);
+
+  if (isFeed) {
+    feedView(inner);
+  } else if (state.selected === UNASSIGNED) {
+    const loose = looseChildren();
+    inner.appendChild(unassignedSection(loose.diffs, loose.exps));
+  } else if (question && question.kind === "question") {
     const kids = childrenOf(question.id);
-    const hit =
-      matchesSearch(question) || kids.diffs.some(matchesSearch) || kids.exps.some(matchesSearch);
-    if (!hit) continue;
-    feedEl.appendChild(
+    inner.appendChild(
       questionSection(question, kids.diffs.filter(passesStatus), kids.exps.filter(passesStatus))
     );
-    sections++;
-  }
-
-  const known = new Set(state.questions.map((q) => q.id));
-  const loose = (entry) => !known.has(qidOf(entry) || "");
-  const looseDiffs = state.diffs.filter((d) => loose(d) && passesStatus(d) && matchesSearch(d));
-  const looseExps = state.experiments.filter((e) => loose(e) && passesStatus(e) && matchesSearch(e));
-  if (looseDiffs.length || looseExps.length) {
-    feedEl.appendChild(unassignedSection(looseDiffs, looseExps));
-    sections++;
-  }
-
-  if (!sections) {
+  } else {
     const empty = el("div", "empty");
-    empty.appendChild(el("span", "glyph", "∅"));
-    empty.appendChild(el("span", null, total ? "nothing matches the current filters." : "the ledger is empty."));
-    feedEl.appendChild(empty);
+    empty.appendChild(el("span", "glyph", total ? "∅" : "…"));
+    empty.appendChild(el("span", null, total ? "that question is not in the ledger." : "loading…"));
+    inner.appendChild(empty);
   }
-  window.scrollTo(0, scrollY);
+
+  navEl.scrollTop = navScroll;
+  detailEl.scrollTop = detailScroll;
 }
 
 searchEl.addEventListener("input", () => {
@@ -1181,6 +1476,7 @@ setInterval(() => {
   loadData(false);
 }, 60000);
 
+state.selected = hashKey();
 loadData(false);
 </script>
 </body>
