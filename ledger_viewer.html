@@ -47,11 +47,15 @@
     background: var(--paper);
     color: var(--ink);
     font-family: var(--sans);
-    font-size: 14px;
+    font-size: 15px;
     line-height: 1.55;
     overflow: hidden;
     -webkit-font-smoothing: antialiased;
   }
+  /* scale the whole UI with display width (readability on large/4k monitors) */
+  @media (min-width: 1800px) { body { zoom: 1.15; } }
+  @media (min-width: 2400px) { body { zoom: 1.35; } }
+  @media (min-width: 3200px) { body { zoom: 1.55; } }
   code, pre, .mono { font-family: var(--mono); }
   button { font-family: inherit; font-size: inherit; color: inherit; cursor: pointer; }
   a { color: var(--link); text-decoration: none; }
