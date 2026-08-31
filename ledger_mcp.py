@@ -56,12 +56,46 @@ METRICS_MISSING = (
     "ledger_update(id=..., add_metrics=[{run_url, key, label}]) as soon as the run reports."
 )
 
+BREVITY_LIMITS = {"title": 70, "summary": 240, "results": 240, "conclusion": 400, "takeaway": 160, "notes": 240}
+
+
+def brevity_warnings(args: dict) -> list[str]:
+    """Length warnings for prose fields — the user reads dozens of entries; verbosity is a defect."""
+    warnings = []
+    for field in ("title", "summary", "results", "conclusion"):
+        value = args.get(field)
+        if isinstance(value, str) and len(value) > BREVITY_LIMITS[field]:
+            warnings.append(
+                f"TOO VERBOSE: {field} is {len(value)} chars (limit ~{BREVITY_LIMITS[field]}). "
+                f"Rewrite it shorter with ledger_update — the user scans dozens of entries."
+            )
+    takeaways = args.get("add_takeaways")
+    if isinstance(takeaways, list):
+        long = [t for t in takeaways if isinstance(t, str) and len(t) > BREVITY_LIMITS["takeaway"]]
+        if long:
+            warnings.append(
+                f"TOO VERBOSE: {len(long)} takeaway(s) exceed ~{BREVITY_LIMITS['takeaway']} chars. "
+                "A takeaway is ONE short declarative fact."
+            )
+    return warnings
+
 GUIDE = """UWLab ledger — what to write and how.
 
 The ledger is a shared record of research questions and the work done under them. It lives outside
 any worktree, so entries written from one worktree are visible everywhere. It is agent-driven: the
 user hands a session a research question or an experiment, and the session finds-or-creates the
 question, attaches the work to it, and keeps it current.
+
+BREVITY (hard rule — the user scans dozens of entries every morning)
+  Every prose field is telegraphic. Cut articles, hedges, restated context, and anything the
+  structured fields already say (ids, jobs, clusters, urls go in their fields, never in prose).
+  Limits (tools warn past them):
+    title       <= ~8 words, no trailing clause
+    summary     1-2 short sentences (<= ~240 chars): what + why, nothing else
+    results     numbers first, one clause of interpretation (<= ~240 chars)
+    conclusion  <= 3 short sentences
+    takeaway    ONE declarative fact, <= ~160 chars
+  Write like a lab notebook margin, not a report.
 
 HIERARCHY
   question -> diffs + experiments + assets. A question is the research line; every diff and
@@ -103,11 +137,10 @@ TAKEAWAYS
   Takeaways are the ledger's knowledge base and what future agents search against. Each one is a
   single, short, declarative fact, self-contained enough that an agent with zero context can act on
   it: name the mechanism/setting and the condition it holds under.
-    good: "A privileged critic collapses on point-cloud obs in in-context PPO; a shared-trunk
-           critic plus LR warmup holds 0.95-0.97 success."
-    good: "Camera envs must be launched with HF_HUB_OFFLINE=1 once the asset cache is warm; the
-           first reset otherwise stalls ~15 min re-resolving textures."
+    good: "Privileged critic collapses on PC obs in in-context PPO; shared-trunk + LR warmup holds 0.95+."
+    good: "Warm-cache camera envs need HF_HUB_OFFLINE=1 or first reset stalls ~15 min on texture HEADs."
     bad:  "It worked." / "The fix helped." / "See exp-2026-08-31-..." (no context, not searchable)
+    bad:  anything over ~160 chars — split it or cut it
   Takeaways are permanent and append-only via add_takeaways. conclusion is the narrative; a
   takeaway is the fact extracted from it.
 
@@ -535,7 +568,7 @@ def tool_add_question(args: dict) -> str:
         "updated": ts,
     }
     write_entry(os.path.join(questions_dir, f"{entry_id}.json"), entry)
-    return f"{entry_id}\n\n{SEARCH_DIRECTIVE}"
+    return "\n".join([entry_id, *brevity_warnings(args), "", SEARCH_DIRECTIVE])
 
 
 def tool_add_diff(args: dict) -> str:
@@ -585,7 +618,10 @@ def tool_add_diff(args: dict) -> str:
     }
     write_entry(os.path.join(diffs_dir, f"{entry_id}.json"), entry)
     stored = "yes" if patch_rel else "no (empty diff)"
-    return f"{entry_id}\nrecorded in {repo}/{worktree} ({branch}); patch stored: {stored}; {len(changed)} files"
+    return "\n".join(
+        [entry_id, f"recorded in {repo}/{worktree} ({branch}); patch stored: {stored}; {len(changed)} files"]
+        + brevity_warnings(args)
+    )
 
 
 def tool_add_experiment(args: dict) -> str:
@@ -637,6 +673,7 @@ def tool_add_experiment(args: dict) -> str:
     if takeaways:
         lines.append("\ntakeaways already on this question:")
         lines += [f"  - {t}" for t in takeaways]
+    lines.extend(brevity_warnings(args))
     lines.append(f"\n{WANDB_DIRECTIVE}")
     lines.append(f"\n{SEARCH_DIRECTIVE}")
     return "\n".join(lines)
@@ -707,7 +744,8 @@ def tool_update(args: dict) -> str:
 
     entry["updated"] = now_ts()
     write_entry(path, entry)
-    return json.dumps(entry, indent=2)
+    warned = brevity_warnings(args)
+    return ("\n".join(warned) + "\n" if warned else "") + json.dumps(entry, indent=2)
 
 
 def tool_add_asset(args: dict) -> str:
