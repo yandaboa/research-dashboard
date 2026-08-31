@@ -355,6 +355,10 @@ def cmd_update(args: argparse.Namespace) -> None:
         takeaways = [t.strip() for t in args.add_takeaway if t.strip()]
         assert takeaways, "--add-takeaway text must not be empty"
         append_dedup(entry, "takeaways", takeaways)
+    if args.set_takeaway:
+        assert kind == "question", "--set-takeaway applies to question entries"
+        assert not args.add_takeaway, "use either --add-takeaway or --set-takeaway, not both"
+        entry["takeaways"] = [t.strip() for t in args.set_takeaway if t.strip()]
     if args.add_asset:
         for spec in args.add_asset:
             label, location = parse_asset(spec)
@@ -611,6 +615,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--add-takeaway",
         action="append",
         help="questions only: a short self-contained finding; repeatable",
+    )
+    p.add_argument(
+        "--set-takeaway",
+        action="append",
+        help="questions only: REPLACE the takeaways list with these; repeatable (for slimming rewrites)",
     )
     p.add_argument(
         "--add-asset",

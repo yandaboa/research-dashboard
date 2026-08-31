@@ -33,3 +33,18 @@ exp-bc-it0-ppo-ramp-gentle-control: skipped (status killed, cached series all fi
 exp-rgb-bc-weighted-v1: 2 ok, 1 err
 exp-rgb-dagger-ctrl2-weighted: skipped (status killed, cached series all finished)
 exp-rgb-dagger-episodic-ctx16-mse: skipped (status killed, cached series all finished)
+exp-2026-08-31-in-context-rfs-steering-vs-ctx5-control: skipped (status killed, cached series all finished)
+exp-2026-08-31-nodr8k-dr-off-half-env-count-8192x4-2-seeds: skipped (status done, cached series all finished)
+exp-2026-08-31-nodrfixed-dr-off-each-env-pinned-to-one-fixed-reset-state-5: skipped (status done, cached series all finished)
+exp-2026-08-31-nodrrand-dr-off-random-resets-16384x4-8-seeds: skipped (status done, cached series all finished)
+exp-2026-08-31-non-episodic-real-finetuning-no-timeout-human-truncate-key-1: skipped (status done, cached series all finished)
+exp-2026-08-31-omnireset-peg-di-skill-beta-sweep-k-4: skipped (status killed, cached series all finished)
+exp-2026-08-31-p3b-first-real-finetuning-run-with-learning-enabled-320-step: skipped (status done, cached series all finished)
+exp-2026-08-31-rfs-v3-kl-anchor-sysid-tam: skipped (status killed, cached series all finished)
+exp-2026-08-31-rldense3x-3x-dense-reward-shaping-5-seeds: skipped (status done, cached series all finished)
+exp-asteroid-it1-ppo-ramp-gentle: 2 ok, 0 err
+exp-asteroid-it4-ppo-ramp-gentle: 2 ok, 0 err
+exp-bc-it0-ppo-ramp-gentle-control: skipped (status killed, cached series all finished)
+exp-rgb-bc-weighted-v1: 2 ok, 1 err
+exp-rgb-dagger-ctrl2-weighted: skipped (status killed, cached series all finished)
+exp-rgb-dagger-episodic-ctx16-mse: skipped (status killed, cached series all finished)

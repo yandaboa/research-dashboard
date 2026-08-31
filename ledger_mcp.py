@@ -141,8 +141,8 @@ TAKEAWAYS
     good: "Warm-cache camera envs need HF_HUB_OFFLINE=1 or first reset stalls ~15 min on texture HEADs."
     bad:  "It worked." / "The fix helped." / "See exp-2026-08-31-..." (no context, not searchable)
     bad:  anything over ~160 chars — split it or cut it
-  Takeaways are permanent and append-only via add_takeaways. conclusion is the narrative; a
-  takeaway is the fact extracted from it.
+  Grow the list with add_takeaways; rewrite the whole list (e.g. to slim it) with takeaways=[...].
+  conclusion is the narrative; a takeaway is the fact extracted from it.
 
 ASSETS
   {label, location} on any entry. location is a path, URL, wandb link, checkpoint, zarr, video.
@@ -378,6 +378,11 @@ TOOLS = [
                         "questions only: short self-contained declarative findings, one fact each, written so "
                         "an agent with zero context can act on them; appended and deduped"
                     ),
+                },
+                "takeaways": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "questions only: REPLACE the whole takeaways list (for slimming rewrites)",
                 },
                 "add_metrics": {
                     "type": "array",
@@ -741,6 +746,10 @@ def tool_update(args: dict) -> str:
     if add_takeaways:
         assert kind == "question", "add_takeaways applies to question entries"
         append_dedup(entry, "takeaways", add_takeaways)
+    if "takeaways" in args:
+        assert kind == "question", "takeaways applies to question entries"
+        assert not add_takeaways, "use either add_takeaways or takeaways, not both"
+        entry["takeaways"] = as_list(args, "takeaways")
 
     entry["updated"] = now_ts()
     write_entry(path, entry)
