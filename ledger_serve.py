@@ -12,7 +12,7 @@ from urllib.parse import unquote, urlparse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from ledger import atomic_write, ledger_root, now_ts, statuses_for, subdirs  # noqa: E402
+from ledger import atomic_write, ledger_root, metrics_dir, now_ts, statuses_for, subdirs  # noqa: E402
 
 VIEWER_HTML = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ledger_viewer.html")
 EDITABLE_FIELDS = ("status", "notes", "results", "conclusion", "summary", "title", "takeaways")
@@ -86,6 +86,16 @@ class Handler(BaseHTTPRequestHandler):
                 "generated": now_ts(),
             }
             self._send_json(200, payload)
+            return
+
+        if path.startswith("/api/metrics/"):
+            entry_id = unquote(path[len("/api/metrics/") :])
+            cache_path = os.path.join(metrics_dir(self.root), f"{os.path.basename(entry_id)}.json")
+            if not entry_id or not os.path.exists(cache_path):
+                self._send_json(404, {"error": "no metrics for this entry"})
+                return
+            with open(cache_path, "rb") as f:
+                self._send(200, f.read(), "application/json; charset=utf-8", no_store=True)
             return
 
         if path.startswith("/api/patch/"):

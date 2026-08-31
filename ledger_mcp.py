@@ -9,10 +9,12 @@ from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from fetch_metrics import parse_run_url  # noqa: E402
 from ledger import (  # noqa: E402
     EXP_STATUSES,
     QUESTION_STATUSES,
     add_asset,
+    add_metric,
     append_dedup,
     assert_question_exists,
     atomic_write,
@@ -41,6 +43,17 @@ SEARCH_DIRECTIVE = (
     "`python3 /home/yandabao/ledger/ledger.py search '<terms>'`) with 2-3 phrasings of the topic, read the "
     "takeaways of any matching questions, and report back anything that should change your plan. Incorporate "
     "relevant takeaways before proceeding."
+)
+
+WANDB_DIRECTIVE = (
+    "wandb: real experiments must ALWAYS log to wandb (--logger wandb). Smoke tests and quick probes must NEVER "
+    "be logged to wandb. Once the run is up, attach its RUN url (…/runs/<id>) and 1-3 key metric names via "
+    "ledger_update add_metrics — the dashboard polls them every 5 minutes and plots them."
+)
+
+METRICS_MISSING = (
+    "metrics missing: this run is marked running but has no linked wandb metrics — attach them with "
+    "ledger_update(id=..., add_metrics=[{run_url, key, label}]) as soon as the run reports."
 )
 
 GUIDE = """UWLab ledger — what to write and how.
@@ -103,6 +116,15 @@ ASSETS
   Attach checkpoints and plots to the experiment that produced them, dataset/paper links to the
   question. Dedup is on location.
 
+METRICS
+  Real experiments must ALWAYS log to wandb (--logger wandb); smoke tests and quick probes must
+  NEVER be logged to wandb. Once a run is up, attach its RUN url (.../runs/<id>, not a project url)
+  and 1-3 metric keys to the experiment -- metrics=[{run_url, key, label}] on
+  ledger_add_experiment, or add_metrics=[...] on ledger_update. A poller refreshes them every 5
+  minutes and the dashboard plots each metric under the experiment. Pick the 1-3 metrics that
+  answer the research question (e.g. the success rate the run is meant to move), not every logged
+  scalar; label is a short human name, defaulting to the last '/' segment of the key.
+
 CONVENTIONS
   * One question per research line, not per run. Near-duplicate questions make the dashboard
     useless -- ledger_search before creating.
@@ -139,7 +161,10 @@ EXAMPLE SEQUENCE
                            question_id="q-does-a-shared-trunk-critic-fix-value-collapse-on-pc-obs",
                            diff_ids=["2026-08-31-shared-trunk-critic-for-in-context-ppo"],
                            status="running", cluster="tillicum", job_ids=["265935","265937"],
-                           wandb=["yandabaocs-university-of-washington/.../265935"])
+                           wandb=["yandabaocs-university-of-washington/.../265935"],
+                           metrics=[{"run_url": "https://wandb.ai/<entity>/<project>/runs/<run_id>",
+                                     "key": "Curriculum/pomdps/mean_success_rate",
+                                     "label": "success"}])
      -> exp-2026-08-31-ctx16-pc-bias-shared-trunk-critic
   5. as artifacts appear:
      ledger_add_asset(id="exp-2026-08-31-ctx16-pc-bias-shared-trunk-critic",
@@ -163,7 +188,7 @@ TOOLS
   ledger_add_diff        record a code change (captures the patch), linked to a question
   ledger_add_experiment  record a run, linked to a question and diff ids
   ledger_add_asset       attach an artifact (checkpoint, video, plot, wandb) to any entry
-  ledger_update          status/results/conclusion, add_takeaways, append job ids, wandb, tags
+  ledger_update          status/results/conclusion, add_takeaways, add_metrics, job ids, wandb, tags
   ledger_list            browse entries (filter by kind/status/worktree/query)
   ledger_show            full JSON for one entry (+ patch path for diffs)
 """
@@ -260,6 +285,26 @@ TOOLS = [
                 "cluster": {"type": "string", "description": "e.g. local, hyak, tillicum"},
                 "job_ids": {"type": "array", "items": {"type": "string"}},
                 "wandb": {"type": "array", "items": {"type": "string"}},
+                "metrics": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "run_url": {
+                                "type": "string",
+                                "description": "wandb RUN url: https://wandb.ai/<entity>/<project>/runs/<run_id>",
+                            },
+                            "key": {"type": "string", "description": "wandb metric key, e.g. Train/mean_reward"},
+                            "label": {"type": "string", "description": "short label; default: last '/' segment"},
+                        },
+                        "required": ["run_url", "key"],
+                        "additionalProperties": False,
+                    },
+                    "description": (
+                        "1-3 wandb metrics to poll and plot on the dashboard; pick the ones that answer the "
+                        "research question, not every logged scalar"
+                    ),
+                },
                 "tags": {"type": "array", "items": {"type": "string"}},
             },
             "required": ["title", "summary"],
@@ -299,6 +344,26 @@ TOOLS = [
                     "description": (
                         "questions only: short self-contained declarative findings, one fact each, written so "
                         "an agent with zero context can act on them; appended and deduped"
+                    ),
+                },
+                "add_metrics": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "run_url": {
+                                "type": "string",
+                                "description": "wandb RUN url: https://wandb.ai/<entity>/<project>/runs/<run_id>",
+                            },
+                            "key": {"type": "string", "description": "wandb metric key, e.g. Train/mean_reward"},
+                            "label": {"type": "string", "description": "short label; default: last '/' segment"},
+                        },
+                        "required": ["run_url", "key"],
+                        "additionalProperties": False,
+                    },
+                    "description": (
+                        "experiments only: attach 1-3 wandb metrics polled every 5 minutes and plotted on the "
+                        "dashboard; appended and deduped on (run_url, key)"
                     ),
                 },
                 "add_diff_ids": {"type": "array", "items": {"type": "string"}},
@@ -405,6 +470,24 @@ def as_list(args: dict, key: str) -> list[str]:
     for item in value:
         assert isinstance(item, str), f"{key} must be an array of strings"
     return [item.strip() for item in value if item.strip()]
+
+
+def as_metrics(args: dict, key: str) -> list[dict]:
+    """[{run_url, key, label?}] -> validated specs with the default label filled in."""
+    value = args.get(key, None)
+    if value is None:
+        return []
+    assert isinstance(value, list), f"{key} must be an array of {{run_url, key}} objects"
+    specs = []
+    for item in value:
+        assert isinstance(item, dict), f"{key} must be an array of {{run_url, key}} objects"
+        run_url = str(item.get("run_url") or "").strip()
+        metric_key = str(item.get("key") or "").strip()
+        parse_run_url(run_url)  # rejects project urls: a RUN url must contain /runs/<id>
+        assert metric_key, f"{key}: each entry needs a non-empty wandb metric key"
+        label = str(item.get("label") or "").strip() or metric_key.rsplit("/", 1)[-1]
+        specs.append({"run_url": run_url, "key": metric_key, "label": label})
+    return specs
 
 
 def assert_diffs_exist(root: str, diff_ids: list[str]) -> None:
@@ -519,6 +602,7 @@ def tool_add_experiment(args: dict) -> str:
         assert_question_exists(root, question_id)
     diff_ids = as_list(args, "diff_ids")
     assert_diffs_exist(root, diff_ids)
+    metrics = as_metrics(args, "metrics")
 
     _, _, exp_dir, _ = subdirs(root)
     entry_id = unique_id(root, f"exp-{datetime.now().strftime('%Y-%m-%d')}-{slugify(title)}")
@@ -535,19 +619,25 @@ def tool_add_experiment(args: dict) -> str:
         "cluster": as_str(args, "cluster", default="") or "",
         "job_ids": as_list(args, "job_ids"),
         "wandb": as_list(args, "wandb"),
+        "metrics": [],
         "results": "",
         "tags": as_list(args, "tags"),
         "assets": [],
         "created": ts,
         "updated": ts,
     }
+    for metric in metrics:
+        add_metric(entry, metric)
     write_entry(os.path.join(exp_dir, f"{entry_id}.json"), entry)
 
     lines = [entry_id]
+    if not entry["metrics"] and status == "running":
+        lines.append(f"\n{METRICS_MISSING}")
     takeaways = question_takeaways(root, question_id) if question_id else []
     if takeaways:
         lines.append("\ntakeaways already on this question:")
         lines += [f"  - {t}" for t in takeaways]
+    lines.append(f"\n{WANDB_DIRECTIVE}")
     lines.append(f"\n{SEARCH_DIRECTIVE}")
     return "\n".join(lines)
 
@@ -602,6 +692,11 @@ def tool_update(args: dict) -> str:
     if add_wandb:
         assert kind == "experiment", "add_wandb applies to experiment entries"
         append_dedup(entry, "wandb", add_wandb)
+    add_metrics = as_metrics(args, "add_metrics")
+    if add_metrics:
+        assert kind == "experiment", "add_metrics applies to experiment entries"
+        for metric in add_metrics:
+            add_metric(entry, metric)
     add_tags = as_list(args, "add_tags")
     if add_tags:
         append_dedup(entry, "tags", add_tags)

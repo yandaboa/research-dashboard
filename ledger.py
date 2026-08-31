@@ -32,8 +32,13 @@ def subdirs(root: str) -> tuple[str, str, str, str]:
     )
 
 
+def metrics_dir(root: str) -> str:
+    """Cache of polled wandb metric series, one <exp-id>.json per experiment. Not an entry dir."""
+    return os.path.join(root, "metrics")
+
+
 def ensure_root(root: str) -> None:
-    for d in subdirs(root):
+    for d in (*subdirs(root), metrics_dir(root)):
         os.makedirs(d, exist_ok=True)
 
 
@@ -235,12 +240,15 @@ def cmd_add_exp(args: argparse.Namespace) -> None:
         "cluster": args.cluster or "",
         "job_ids": split_list(args.jobs),
         "wandb": split_list(args.wandb),
+        "metrics": [],
         "results": "",
         "tags": split_list(args.tags),
         "assets": [],
         "created": ts,
         "updated": ts,
     }
+    for spec in args.metric or []:
+        add_metric(entry, parse_metric(spec))
     write_entry(os.path.join(exp_dir, f"{entry_id}.json"), entry)
     print(entry_id)
 
@@ -263,6 +271,27 @@ def add_asset(entry: dict, label: str, location: str) -> None:
         return
     assets.append({"label": label.strip(), "location": location.strip()})
     entry["assets"] = assets
+
+
+def add_metric(entry: dict, metric: dict) -> None:
+    """Append a {run_url, key, label} wandb metric spec; dedup on (run_url, key)."""
+    metrics = [m for m in (entry.get("metrics") or []) if isinstance(m, dict)]
+    if not any(m.get("run_url") == metric["run_url"] and m.get("key") == metric["key"] for m in metrics):
+        metrics.append(metric)
+    entry["metrics"] = metrics
+
+
+def parse_metric(spec: str) -> dict:
+    """'RUN_URL|KEY[|LABEL]' -> {run_url, key, label}; label defaults to the last '/' segment of key."""
+    from fetch_metrics import parse_run_url  # deferred: fetch_metrics imports this module
+
+    parts = [part.strip() for part in spec.split("|")]
+    assert len(parts) in (2, 3), f"--metric expects 'RUN_URL|KEY[|LABEL]', got: {spec}"
+    run_url, key = parts[0], parts[1]
+    parse_run_url(run_url)
+    assert key, f"--metric needs a non-empty wandb metric key: {spec}"
+    label = (parts[2] if len(parts) == 3 else "") or key.rsplit("/", 1)[-1]
+    return {"run_url": run_url, "key": key, "label": label}
 
 
 def parse_asset(spec: str) -> tuple[str, str]:
@@ -315,6 +344,10 @@ def cmd_update(args: argparse.Namespace) -> None:
     if args.add_wandb:
         assert kind == "experiment", "--add-wandb applies to experiment entries"
         append_dedup(entry, "wandb", split_list(args.add_wandb))
+    if args.metric:
+        assert kind == "experiment", "--metric applies to experiment entries"
+        for spec in args.metric:
+            add_metric(entry, parse_metric(spec))
     if args.add_tags:
         append_dedup(entry, "tags", split_list(args.add_tags))
     if args.add_takeaway:
@@ -345,18 +378,24 @@ def cmd_set_status(args: argparse.Namespace) -> None:
     print(entry["id"])
 
 
+def load_dir_entries(directory: str) -> list[dict]:
+    entries = []
+    if not os.path.isdir(directory):
+        return entries
+    for name in sorted(os.listdir(directory)):
+        if not name.endswith(".json"):
+            continue
+        try:
+            entries.append(load_entry(os.path.join(directory, name)))
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"warning: skipping {name}: {exc}", file=sys.stderr)
+    return entries
+
+
 def load_all(root: str) -> list[dict]:
     entries = []
     for d in subdirs(root)[:3]:
-        if not os.path.isdir(d):
-            continue
-        for name in sorted(os.listdir(d)):
-            if not name.endswith(".json"):
-                continue
-            try:
-                entries.append(load_entry(os.path.join(d, name)))
-            except (OSError, json.JSONDecodeError) as exc:
-                print(f"warning: skipping {name}: {exc}", file=sys.stderr)
+        entries += load_dir_entries(d)
     return entries
 
 
@@ -417,6 +456,7 @@ SEARCH_WEIGHTS = {
     "job_ids": 1,
     "wandb": 1,
     "assets": 1,
+    "metrics": 1,
 }
 SNIPPET_FIELDS = ("takeaways", "conclusion", "results", "summary", "notes", "title")
 SNIPPET_WIDTH = 140
@@ -539,6 +579,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--cluster")
     p.add_argument("--jobs")
     p.add_argument("--wandb")
+    p.add_argument(
+        "--metric",
+        action="append",
+        metavar="RUN_URL|KEY[|LABEL]",
+        help="wandb metric to poll and plot; RUN url (.../runs/<id>), repeatable",
+    )
     p.add_argument("--tags")
     p.set_defaults(func=cmd_add_exp)
 
@@ -554,6 +600,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--add-diffs")
     p.add_argument("--add-jobs")
     p.add_argument("--add-wandb")
+    p.add_argument(
+        "--metric",
+        action="append",
+        metavar="RUN_URL|KEY[|LABEL]",
+        help="experiments only: attach a wandb metric to poll and plot; repeatable, deduped",
+    )
     p.add_argument("--add-tags")
     p.add_argument(
         "--add-takeaway",

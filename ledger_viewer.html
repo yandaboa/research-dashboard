@@ -356,6 +356,34 @@
   .asset .txt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .asset .arrow { flex: none; font-size: 10px; opacity: 0.7; }
 
+  /* ---- metric charts ---- */
+  .metrics { margin-top: 14px; display: flex; flex-direction: column; gap: 9px; }
+  .chartbox { margin-top: 14px; border: 1px solid var(--rule); border-radius: 3px; padding: 7px 11px 5px; }
+  .metrics .chartbox { margin-top: 0; }
+  .charthead { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+  .charthead .grow { flex: 1; min-width: 0; }
+  .charthead .dot { align-self: center; }
+  .chartstat { font-family: var(--mono); font-size: 15px; line-height: 1.1; color: var(--ink); }
+  .chartas { font-family: var(--mono); font-size: 10px; color: var(--muted); }
+  .chartwrap { position: relative; height: 130px; margin-top: 3px; }
+  .chartwrap svg { display: block; }
+  .charttip {
+    position: absolute;
+    z-index: 20;
+    pointer-events: none;
+    transform: translate(-50%, -100%);
+    background: var(--paper);
+    border: 1px solid var(--rule);
+    border-radius: 3px;
+    padding: 2px 6px;
+    font-family: var(--mono);
+    font-size: 10.5px;
+    line-height: 1.4;
+    color: var(--ink);
+    white-space: nowrap;
+  }
+  .charterr { margin-top: 3px; color: var(--muted); font-size: 12px; font-style: italic; }
+
   .sublist { margin-top: 22px; }
   .sublabel { display: flex; align-items: center; gap: 8px; }
   .sublabel .n { font-family: var(--mono); font-size: 10px; color: var(--muted); }
@@ -582,6 +610,8 @@ const state = {
   filters: { question: new Set(), diff: new Set(), experiment: new Set() },
   openFiles: new Set(),
   collapsed: new Set(),
+  metricsCache: new Map(), // exp id -> payload from /api/metrics/<id>, or null when there is none
+
   editing: null,
   selected: null, // null = feed overview, else question id or UNASSIGNED
   error: "",
@@ -640,6 +670,9 @@ function assetsOf(entry) {
 function plural(n, word) {
   return n + " " + word + (n === 1 ? "" : "s");
 }
+function metricSpecsOf(entry) {
+  return Array.isArray(entry.metrics) ? entry.metrics.filter((m) => m && m.key) : [];
+}
 
 async function api(path, opts) {
   const res = await fetch(path, opts);
@@ -682,6 +715,7 @@ async function loadData(showToast) {
     state.error = String(err.message || err);
     toast("load failed: " + state.error, true);
   }
+  refreshMetrics();
   render();
 }
 
@@ -704,6 +738,7 @@ function matchesSearch(entry) {
     (entry.job_ids || []).join(" "),
     listField(entry, "takeaways").join("   "),
     assetsOf(entry).map((a) => (a.label || "") + " " + a.location).join("   "),
+    metricSpecsOf(entry).map((m) => (m.label || "") + " " + (m.key || "")).join("   "),
   ];
   const hay = parts.filter(Boolean).join("   ").toLowerCase();
   return q.split(/\s+/).every((tok) => hay.includes(tok));
@@ -1037,6 +1072,338 @@ function copyLocation(loc) {
   );
 }
 
+// ---- metric charts ------------------------------------------------------------
+// One chart per metric key; series identity is carried by a direct end label, never by color alone.
+
+const SVGNS = "http://www.w3.org/2000/svg";
+const SERIES_COLORS = ["#403E37", "#B58A2A", "#3E6B47", "#A6473E"];
+const CHART_H = 130;
+const metricsInflight = new Set();
+
+function svgEl(tag, attrs) {
+  const node = document.createElementNS(SVGNS, tag);
+  for (const key of Object.keys(attrs || {})) node.setAttribute(key, String(attrs[key]));
+  return node;
+}
+
+function fmtMetric(v) {
+  if (typeof v !== "number" || !isFinite(v)) return "—";
+  const a = Math.abs(v);
+  if (a === 0) return "0";
+  if (a >= 1e5 || a < 1e-3) return v.toExponential(2);
+  if (a >= 100) return v.toFixed(1);
+  return v.toFixed(3);
+}
+function fmtStep(v) {
+  if (typeof v !== "number" || !isFinite(v)) return "—";
+  const a = Math.abs(v);
+  if (a >= 1e6) return (v / 1e6).toFixed(a % 1e6 ? 1 : 0) + "M";
+  if (a >= 1e4) return (v / 1e3).toFixed(a % 1e3 ? 1 : 0) + "k";
+  return String(Math.round(v));
+}
+function runIdOf(url) {
+  const parts = String(url || "").split("/").filter(Boolean);
+  return parts.length ? parts[parts.length - 1] : "run";
+}
+function normPoints(series) {
+  const raw = Array.isArray(series.points) ? series.points : [];
+  const points = raw
+    .filter((p) => Array.isArray(p) && typeof p[0] === "number" && typeof p[1] === "number")
+    .filter((p) => isFinite(p[0]) && isFinite(p[1]))
+    .map((p) => [p[0], p[1]]);
+  points.sort((a, b) => a[0] - b[0]);
+  return points;
+}
+function latestOf(series, points) {
+  if (typeof series.latest === "number" && isFinite(series.latest)) return series.latest;
+  return points.length ? points[points.length - 1][1] : null;
+}
+function runStateClass(runState) {
+  if (runState === "running") return "st-running";
+  if (runState === "finished") return "st-done";
+  if (runState === "crashed" || runState === "failed") return "st-killed";
+  return "st-unreviewed";
+}
+function seriesTag(series, group) {
+  const labels = group.map((s) => String(s.label || ""));
+  const label = String(series.label || "");
+  if (label && labels.filter((l) => l === label).length === 1) return label;
+  return runIdOf(series.run_url);
+}
+function chartLabel(key, group) {
+  const first = group.find((s) => s.label);
+  if (first) return String(first.label);
+  const parts = String(key).split("/").filter(Boolean);
+  return parts.length ? parts[parts.length - 1] : String(key);
+}
+
+let renderTimer = null;
+function scheduleRender() {
+  if (renderTimer) return;
+  renderTimer = setTimeout(() => {
+    renderTimer = null;
+    const active = document.activeElement;
+    if (state.editing || (active && active.tagName === "TEXTAREA")) return;
+    render();
+  }, 0);
+}
+
+function fetchMetrics(id, force) {
+  if (metricsInflight.has(id)) return;
+  if (!force && state.metricsCache.has(id)) return;
+  metricsInflight.add(id);
+  const done = (payload) => {
+    metricsInflight.delete(id);
+    const before = state.metricsCache.has(id) ? JSON.stringify(state.metricsCache.get(id)) : null;
+    state.metricsCache.set(id, payload);
+    if (JSON.stringify(payload) !== before) scheduleRender();
+  };
+  fetch("/api/metrics/" + encodeURIComponent(id), { cache: "no-store" })
+    .then((res) => (res.ok ? res.json() : null)) // 404 -> "none"
+    .then((data) => done(data && Array.isArray(data.series) ? data : null))
+    .catch(() => done(null));
+}
+
+function refreshMetrics() {
+  for (const id of Array.from(state.metricsCache.keys())) fetchMetrics(id, true);
+}
+
+function chartBox(key, group, fetched) {
+  const box = el("div", "chartbox");
+  const drawn = group
+    .map((s) => ({ series: s, points: normPoints(s) }))
+    .filter((s) => s.points.length);
+
+  const head = el("div", "charthead");
+  head.appendChild(el("span", "label grow", chartLabel(key, group)));
+  const stat = drawn.length ? latestOf(drawn[0].series, drawn[0].points) : null;
+  if (stat !== null) head.appendChild(el("span", "chartstat", fmtMetric(stat)));
+  for (const s of group) {
+    const running = s.run_state === "running";
+    const dot = el("span", "dot " + runStateClass(s.run_state) + (running ? " pulse" : ""));
+    dot.title = seriesTag(s, group) + " · " + (s.run_state || "unknown state");
+    head.appendChild(dot);
+  }
+  if (fetched) {
+    const as = el("span", "chartas", "as of " + fmtStamp(fetched));
+    as.title = String(fetched);
+    head.appendChild(as);
+  }
+  box.appendChild(head);
+
+  if (drawn.length) {
+    const wrap = el("div", "chartwrap");
+    wrap.__chart = {
+      series: drawn.map((s, i) => ({
+        tag: seriesTag(s.series, group),
+        color: SERIES_COLORS[i % SERIES_COLORS.length],
+        points: s.points,
+      })),
+    };
+    box.appendChild(wrap);
+  }
+  for (const s of group) {
+    if (s.error) box.appendChild(el("div", "charterr", "metric fetch failed: " + s.error));
+  }
+  if (!drawn.length && !group.some((s) => s.error)) box.appendChild(el("div", "charterr", "no points logged yet"));
+  return box;
+}
+
+function metricsBlock(entry) {
+  const specs = metricSpecsOf(entry);
+  if (Array.isArray(entry.metrics) && !specs.length) return null; // explicitly no metrics: no box at all
+  if (!state.metricsCache.has(entry.id)) {
+    fetchMetrics(entry.id, false);
+    return null;
+  }
+  const payload = state.metricsCache.get(entry.id);
+  if (!payload) return null;
+  const series = (payload.series || []).filter((s) => s && s.key);
+  if (!series.length) return null;
+
+  const groups = new Map();
+  for (const s of series) {
+    const key = String(s.key);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(s);
+  }
+  const box = el("div", "metrics");
+  for (const [key, group] of groups) box.appendChild(chartBox(key, group, payload.fetched));
+  return box;
+}
+
+function nearestPoint(points, x) {
+  let best = null;
+  let bestDist = Infinity;
+  for (const p of points) {
+    const d = Math.abs(p[0] - x);
+    if (d < bestDist) {
+      bestDist = d;
+      best = p;
+    }
+  }
+  return best;
+}
+
+function drawChart(wrap) {
+  const spec = wrap.__chart;
+  if (!spec) return;
+  const width = Math.round(wrap.clientWidth);
+  if (width < 120) return;
+  if (wrap.__drawnAt === width) return;
+  wrap.__drawnAt = width;
+  wrap.textContent = "";
+
+  const multi = spec.series.length > 1;
+  const pad = { l: 46, r: multi ? 66 : 18, t: 12, b: 18 };
+  const plotW = Math.max(20, width - pad.l - pad.r);
+  const plotH = Math.max(20, CHART_H - pad.t - pad.b);
+  let xmin = Infinity;
+  let xmax = -Infinity;
+  let ymin = Infinity;
+  let ymax = -Infinity;
+  for (const s of spec.series) {
+    for (const p of s.points) {
+      if (p[0] < xmin) xmin = p[0];
+      if (p[0] > xmax) xmax = p[0];
+      if (p[1] < ymin) ymin = p[1];
+      if (p[1] > ymax) ymax = p[1];
+    }
+  }
+  if (!isFinite(xmin) || !isFinite(ymin)) return;
+  if (xmax === xmin) xmax = xmin + 1;
+  const span = ymax - ymin;
+  const padY = span > 0 ? span * 0.05 : Math.max(Math.abs(ymax) * 0.05, 0.5);
+  const y0 = ymin - padY;
+  const y1 = ymax + padY;
+  const sx = (v) => pad.l + ((v - xmin) / (xmax - xmin)) * plotW;
+  const sy = (v) => pad.t + (1 - (v - y0) / (y1 - y0)) * plotH;
+
+  const svg = svgEl("svg", { width: width, height: CHART_H, viewBox: "0 0 " + width + " " + CHART_H });
+  for (const frac of [0, 0.5, 1]) {
+    const y = pad.t + plotH * frac;
+    svg.appendChild(
+      svgEl("line", {
+        x1: pad.l,
+        y1: y,
+        x2: pad.l + plotW,
+        y2: y,
+        style: "stroke: var(--rule); stroke-width: 1",
+        "shape-rendering": "crispEdges",
+      })
+    );
+  }
+
+  const tickStyle = "fill: var(--muted); font-family: var(--mono); font-size: 10px";
+  const tick = (x, y, text, anchor) => {
+    const node = svgEl("text", { x: x, y: y, "text-anchor": anchor, style: tickStyle });
+    node.textContent = text;
+    svg.appendChild(node);
+  };
+  tick(pad.l - 7, pad.t + 3, fmtMetric(y1), "end");
+  tick(pad.l - 7, pad.t + plotH + 3, fmtMetric(y0), "end");
+  tick(pad.l, CHART_H - 4, fmtStep(xmin), "start");
+  tick(pad.l + plotW, CHART_H - 4, fmtStep(xmax), "end");
+
+  for (const s of spec.series) {
+    const d = s.points.map((p, i) => (i ? "L" : "M") + sx(p[0]).toFixed(1) + " " + sy(p[1]).toFixed(1)).join(" ");
+    svg.appendChild(
+      svgEl("path", {
+        d: d,
+        fill: "none",
+        stroke: s.color,
+        "stroke-width": 2,
+        "stroke-linejoin": "round",
+        "stroke-linecap": "round",
+      })
+    );
+    const last = s.points[s.points.length - 1];
+    svg.appendChild(svgEl("circle", { cx: sx(last[0]), cy: sy(last[1]), r: 3.5, fill: s.color }));
+    if (multi) {
+      const label = svgEl("text", {
+        x: Math.min(sx(last[0]) + 7, width - 2),
+        y: Math.min(Math.max(sy(last[1]) + 3.5, pad.t + 4), pad.t + plotH),
+        style: "fill: " + s.color + "; font-family: var(--mono); font-size: 10px",
+      });
+      label.textContent = s.tag;
+      svg.appendChild(label);
+    }
+  }
+
+  const cross = svgEl("line", {
+    x1: pad.l,
+    y1: pad.t,
+    x2: pad.l,
+    y2: pad.t + plotH,
+    style: "stroke: var(--edge-mid); stroke-width: 1",
+    "shape-rendering": "crispEdges",
+    visibility: "hidden",
+  });
+  svg.appendChild(cross);
+  const markers = spec.series.map((s) => {
+    const dot = svgEl("circle", { r: 2.5, fill: s.color, visibility: "hidden" });
+    svg.appendChild(dot);
+    return dot;
+  });
+  wrap.appendChild(svg);
+
+  const tip = el("div", "charttip");
+  tip.style.display = "none";
+  wrap.appendChild(tip);
+  const hide = () => {
+    cross.setAttribute("visibility", "hidden");
+    for (const m of markers) m.setAttribute("visibility", "hidden");
+    tip.style.display = "none";
+  };
+  svg.addEventListener("mousemove", (ev) => {
+    const rect = svg.getBoundingClientRect();
+    const px = Math.min(Math.max(ev.clientX - rect.left, pad.l), pad.l + plotW);
+    const xv = xmin + ((px - pad.l) / plotW) * (xmax - xmin);
+    const near = spec.series.map((s) => nearestPoint(s.points, xv));
+    const anchor = near.find(Boolean);
+    if (!anchor) {
+      hide();
+      return;
+    }
+    spec.series.forEach((s, i) => {
+      const p = near[i];
+      if (!p) {
+        markers[i].setAttribute("visibility", "hidden");
+        return;
+      }
+      markers[i].setAttribute("cx", String(sx(p[0])));
+      markers[i].setAttribute("cy", String(sy(p[1])));
+      markers[i].setAttribute("visibility", "visible");
+    });
+    cross.setAttribute("x1", String(sx(anchor[0])));
+    cross.setAttribute("x2", String(sx(anchor[0])));
+    cross.setAttribute("visibility", "visible");
+    tip.textContent = "";
+    if (multi) {
+      tip.appendChild(el("div", null, fmtStep(anchor[0])));
+      spec.series.forEach((s, i) => {
+        if (near[i]) tip.appendChild(el("div", null, s.tag + " · " + fmtMetric(near[i][1])));
+      });
+    } else {
+      tip.appendChild(el("div", null, fmtStep(anchor[0]) + " · " + fmtMetric(anchor[1])));
+    }
+    tip.style.display = "block";
+    tip.style.left = Math.min(Math.max(sx(anchor[0]), 46), width - 46) + "px";
+    tip.style.top = Math.max(16, sy(anchor[1]) - 7) + "px";
+  });
+  svg.addEventListener("mouseleave", hide);
+}
+
+function drawCharts() {
+  document.querySelectorAll(".chartwrap").forEach(drawChart);
+}
+
+let resizeTimer = null;
+window.addEventListener("resize", () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(drawCharts, 120);
+});
+
 function metaText(node, text) {
   node.appendChild(el("span", null, text));
 }
@@ -1156,6 +1523,9 @@ function expRow(entry) {
     for (const id of diffIds) line.appendChild(refChip(state.byId.get(id)));
     row.appendChild(line);
   }
+
+  const metrics = metricsBlock(entry);
+  if (metrics) row.appendChild(metrics);
 
   row.appendChild(editableBlock(entry, "results", "results"));
   return row;
@@ -1452,6 +1822,7 @@ function render() {
 
   navEl.scrollTop = navScroll;
   detailEl.scrollTop = detailScroll;
+  drawCharts(); // charts need a measured width, so they draw after the tree is in the document
 }
 
 searchEl.addEventListener("input", () => {
