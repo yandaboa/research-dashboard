@@ -16,18 +16,21 @@ DEFAULT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 DIFF_STATUSES = ("unreviewed", "questionable", "known_good")
 EXP_STATUSES = ("planned", "running", "done", "killed", "failed")
 QUESTION_STATUSES = ("open", "answered", "parked")
+TRUTH_STATUSES = ("active", "deprecated")
+ENTRY_KINDS = ("question", "diff", "experiment", "truth")
 
 
 def ledger_root() -> str:
     return os.environ.get("UWLAB_LEDGER_ROOT", DEFAULT_ROOT)
 
 
-def subdirs(root: str) -> tuple[str, str, str, str]:
-    """(questions, diffs, experiments, patches) — entry dirs first, patches last."""
+def subdirs(root: str) -> tuple[str, str, str, str, str]:
+    """(questions, diffs, experiments, truths, patches) — the four entry dirs first, patches last."""
     return (
         os.path.join(root, "questions"),
         os.path.join(root, "diffs"),
         os.path.join(root, "experiments"),
+        os.path.join(root, "truths"),
         os.path.join(root, "patches"),
     )
 
@@ -184,7 +187,7 @@ def format_commit_line(commit: dict | str) -> str:
 
 
 def entry_path(root: str, entry_id: str) -> str | None:
-    for d in subdirs(root)[:3]:
+    for d in subdirs(root)[:4]:
         path = os.path.join(d, f"{entry_id}.json")
         if os.path.exists(path):
             return path
@@ -219,19 +222,77 @@ def load_entry(path: str) -> dict:
 def statuses_for(kind: str) -> tuple[str, ...]:
     if kind == "question":
         return QUESTION_STATUSES
+    if kind == "truth":
+        return TRUTH_STATUSES
     return DIFF_STATUSES if kind == "diff" else EXP_STATUSES
 
 
 def assert_question_exists(root: str, question_id: str) -> None:
-    questions_dir, _, _, _ = subdirs(root)
+    questions_dir = subdirs(root)[0]
     assert os.path.exists(os.path.join(questions_dir, f"{question_id}.json")), f"unknown question id: {question_id}"
+
+
+def make_source(root: str, source_id: str) -> dict:
+    """{kind, id} for an existing ledger entry; a truth may only cite entries that exist."""
+    path = entry_path(root, source_id)
+    assert path is not None, f"unknown source id: {source_id}"
+    return {"kind": load_entry(path).get("kind", "question"), "id": source_id}
+
+
+def add_source(entry: dict, source: dict) -> None:
+    """Append a {kind, id} source to a truth; dedup on id."""
+    sources = [s for s in (entry.get("sources") or []) if isinstance(s, dict)]
+    if not any(s.get("id") == source["id"] for s in sources):
+        sources.append(source)
+    entry["sources"] = sources
+
+
+def create_truth(
+    root: str, text: str, why: str = "", tags: list[str] | None = None, source_ids: list[str] | None = None
+) -> str:
+    """Write a new truth entry; returns its id."""
+    ensure_root(root)
+    assert text.strip(), "truth text must not be empty"
+    truths_dir = subdirs(root)[3]
+    entry_id = unique_id(root, f"t-{slugify(text)[:50].strip('-') or 'truth'}")
+    ts = now_ts()
+    entry = {
+        "kind": "truth",
+        "id": entry_id,
+        "text": text.strip(),
+        "why": (why or "").strip(),
+        "status": "active",
+        "tags": list(tags or []),
+        "sources": [],
+        "created": ts,
+        "updated": ts,
+    }
+    for source_id in source_ids or []:
+        add_source(entry, make_source(root, source_id))
+    write_entry(os.path.join(truths_dir, f"{entry_id}.json"), entry)
+    return entry_id
+
+
+def resolve_takeaway(entry: dict, selector: str) -> str:
+    """A question's takeaway selected by exact text or 1-based index."""
+    takeaways = [t for t in (entry.get("takeaways") or []) if isinstance(t, str)]
+    assert takeaways, f"question {entry.get('id')} has no takeaways to promote"
+    selector = selector.strip()
+    if selector.isdigit():
+        index = int(selector)
+        assert 1 <= index <= len(takeaways), f"takeaway index {index} out of range (1..{len(takeaways)})"
+        return takeaways[index - 1]
+    for takeaway in takeaways:
+        if takeaway.strip() == selector:
+            return takeaway
+    raise AssertionError(f"no takeaway matching {selector!r} on {entry.get('id')}")
 
 
 def cmd_add_question(args: argparse.Namespace) -> None:
     root = ledger_root()
     ensure_root(root)
     assert args.status in QUESTION_STATUSES, f"status must be one of {QUESTION_STATUSES}"
-    questions_dir, _, _, _ = subdirs(root)
+    questions_dir = subdirs(root)[0]
 
     entry_id = unique_id(root, args.id or f"q-{slugify(args.title)}")
     ts = now_ts()
@@ -256,7 +317,7 @@ def cmd_add_diff(args: argparse.Namespace) -> None:
     root = ledger_root()
     ensure_root(root)
     assert args.status in DIFF_STATUSES, f"status must be one of {DIFF_STATUSES}"
-    _, diffs_dir, _, _ = subdirs(root)
+    diffs_dir = subdirs(root)[1]
     if args.question:
         assert_question_exists(root, args.question)
 
@@ -313,7 +374,7 @@ def cmd_add_exp(args: argparse.Namespace) -> None:
     root = ledger_root()
     ensure_root(root)
     assert args.status in EXP_STATUSES, f"status must be one of {EXP_STATUSES}"
-    _, diffs_dir, exp_dir, _ = subdirs(root)
+    _, diffs_dir, exp_dir, _, _ = subdirs(root)
     if args.question:
         assert_question_exists(root, args.question)
 
@@ -347,6 +408,28 @@ def cmd_add_exp(args: argparse.Namespace) -> None:
         add_metric(entry, parse_metric(spec))
     write_entry(os.path.join(exp_dir, f"{entry_id}.json"), entry)
     print(entry_id)
+
+
+def cmd_add_truth(args: argparse.Namespace) -> None:
+    root = ledger_root()
+    print(create_truth(root, args.text, args.why or "", split_list(args.tags), split_list(args.source)))
+
+
+def cmd_delete_truth(args: argparse.Namespace) -> None:
+    root = ledger_root()
+    path = os.path.join(subdirs(root)[3], f"{args.id}.json")
+    assert os.path.exists(path), f"no truth with id {args.id}"
+    os.remove(path)
+    print(args.id)
+
+
+def cmd_promote(args: argparse.Namespace) -> None:
+    root = ledger_root()
+    path = os.path.join(subdirs(root)[0], f"{args.id}.json")
+    assert os.path.exists(path), f"no question with id {args.id}"
+    question = load_entry(path)
+    text = resolve_takeaway(question, args.takeaway)
+    print(create_truth(root, text, args.why or "", split_list(args.tags), [question["id"]]))
 
 
 def append_dedup(entry: dict, key: str, values: list[str]) -> None:
@@ -422,6 +505,18 @@ def cmd_update(args: argparse.Namespace) -> None:
     if args.conclusion is not None:
         assert kind == "question", "--conclusion applies to question entries"
         entry["conclusion"] = args.conclusion
+    if args.text is not None:
+        assert kind == "truth", "--text applies to truth entries"
+        assert args.text.strip(), "truth text must not be empty"
+        entry["text"] = args.text.strip()
+    if args.why is not None:
+        assert kind == "truth", "--why applies to truth entries"
+        entry["why"] = args.why.strip()
+    if args.add_source:
+        assert kind == "truth", "--add-source applies to truth entries"
+        for spec in args.add_source:
+            for source_id in split_list(spec):
+                add_source(entry, make_source(root, source_id))
     if args.question is not None:
         assert kind in ("diff", "experiment"), "--question applies to diff/experiment entries"
         if args.question:
@@ -429,7 +524,7 @@ def cmd_update(args: argparse.Namespace) -> None:
         entry["question_id"] = args.question or None
     if args.add_diffs:
         assert kind == "experiment", "--add-diffs applies to experiment entries"
-        _, diffs_dir, _, _ = subdirs(root)
+        diffs_dir = subdirs(root)[1]
         new_ids = split_list(args.add_diffs)
         for diff_id in new_ids:
             assert os.path.exists(os.path.join(diffs_dir, f"{diff_id}.json")), f"unknown diff id: {diff_id}"
@@ -497,7 +592,7 @@ def load_dir_entries(directory: str) -> list[dict]:
 
 def load_all(root: str) -> list[dict]:
     entries = []
-    for d in subdirs(root)[:3]:
+    for d in subdirs(root)[:4]:
         entries += load_dir_entries(d)
     return entries
 
@@ -506,8 +601,16 @@ def where_column(entry: dict) -> str:
     kind = entry.get("kind", "diff")
     if kind == "question":
         return "-"
+    if kind == "truth":
+        tags = entry.get("tags") or []
+        return tags[0] if tags else "-"
     where = entry.get("worktree") if kind == "diff" else entry.get("cluster")
     return where or "-"
+
+
+def display_title(entry: dict) -> str:
+    """Truths carry `text` instead of a title."""
+    return entry.get("title") or entry.get("text") or ""
 
 
 def cmd_list(args: argparse.Namespace) -> None:
@@ -525,7 +628,7 @@ def cmd_list(args: argparse.Namespace) -> None:
     rows = []
     for e in entries:
         where = where_column(e)
-        title = e.get("title", "")
+        title = display_title(e)
         rows.append(
             (
                 e.get("id", ""),
@@ -542,8 +645,10 @@ def cmd_list(args: argparse.Namespace) -> None:
 
 
 SEARCH_WEIGHTS = {
+    "text": 6,  # truths: the curated fact outranks a per-question takeaway
     "takeaways": 5,
     "conclusion": 4,
+    "why": 3,
     "title": 3,
     "tags": 3,
     "summary": 2,
@@ -561,7 +666,7 @@ SEARCH_WEIGHTS = {
     "assets": 1,
     "metrics": 1,
 }
-SNIPPET_FIELDS = ("takeaways", "conclusion", "results", "summary", "notes", "title")
+SNIPPET_FIELDS = ("text", "why", "takeaways", "conclusion", "results", "summary", "notes", "title")
 SNIPPET_WIDTH = 140
 
 
@@ -592,6 +697,13 @@ def trim_snippet(line: str, width: int = SNIPPET_WIDTH) -> str:
     return line if len(line) <= width else line[: width - 1] + "…"
 
 
+def mark_deprecated(entry: dict, snippets: list[str]) -> list[str]:
+    """Deprecated truths stay searchable; their snippets say so."""
+    if entry.get("kind") != "truth" or entry.get("status") != "deprecated":
+        return snippets
+    return [f"(deprecated) {snippet}" for snippet in snippets] or ["(deprecated)"]
+
+
 def snippets_for(entry: dict, tokens: list[str], limit: int = 3) -> list[str]:
     snippets: list[str] = []
     for key in SNIPPET_FIELDS:
@@ -604,8 +716,8 @@ def snippets_for(entry: dict, tokens: list[str], limit: int = 3) -> list[str]:
             if snippet not in snippets:
                 snippets.append(snippet)
             if len(snippets) >= limit:
-                return snippets
-    return snippets
+                return mark_deprecated(entry, snippets)
+    return mark_deprecated(entry, snippets)
 
 
 def search_entries(entries: list[dict], query: str, limit: int = 8) -> list[tuple[dict, int, list[str]]]:
@@ -635,7 +747,7 @@ def cmd_search(args: argparse.Namespace) -> None:
         return
     for entry, score, snippets in hits:
         head = f"{entry.get('kind', '')}:{entry.get('status', '')}"
-        print(f"{score:>4}  {entry.get('id', '')}  {head}  {entry.get('title', '')}")
+        print(f"{score:>4}  {entry.get('id', '')}  {head}  {display_title(entry)}")
         for snippet in snippets:
             print(f"        {snippet}")
 
@@ -696,6 +808,24 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--tags")
     p.set_defaults(func=cmd_add_exp)
 
+    p = sub.add_parser("add-truth", help="add a cross-cutting best practice or gotcha")
+    p.add_argument("--text", required=True, help="ONE declarative fact/practice, <= ~160 chars")
+    p.add_argument("--why", default="", help="one-line mechanism or evidence")
+    p.add_argument("--tags")
+    p.add_argument("--source", help="comma-separated ids of ledger entries this truth came from")
+    p.set_defaults(func=cmd_add_truth)
+
+    p = sub.add_parser("delete-truth", help="really delete a truth (prefer update --status deprecated)")
+    p.add_argument("id")
+    p.set_defaults(func=cmd_delete_truth)
+
+    p = sub.add_parser("promote", help="promote a question takeaway into a truth")
+    p.add_argument("id", help="question id")
+    p.add_argument("--takeaway", required=True, help="exact takeaway text or its 1-based index")
+    p.add_argument("--why", default="")
+    p.add_argument("--tags")
+    p.set_defaults(func=cmd_promote)
+
     p = sub.add_parser("update", help="edit an existing entry")
     p.add_argument("id")
     p.add_argument("--status")
@@ -704,6 +834,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--results")
     p.add_argument("--notes")
     p.add_argument("--conclusion", help="questions only: the evolving answer")
+    p.add_argument("--text", help="truths only: the fact itself")
+    p.add_argument("--why", help="truths only: the one-line mechanism or evidence")
+    p.add_argument(
+        "--add-source",
+        action="append",
+        help="truths only: comma-separated ledger entry ids this truth came from; repeatable",
+    )
     p.add_argument("--question", help="diff/experiment only: question id, empty string clears the link")
     p.add_argument("--add-diffs")
     p.add_argument("--add-commits", help="diffs only: comma-separated commit refs, resolved in the cwd repo")
@@ -740,13 +877,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_set_status)
 
     p = sub.add_parser("list", help="compact table of entries")
-    p.add_argument("--kind", choices=["question", "diff", "experiment"])
+    p.add_argument("--kind", choices=list(ENTRY_KINDS))
     p.add_argument("--status")
     p.set_defaults(func=cmd_list)
 
-    p = sub.add_parser("search", help="rank entries against a query (takeaways weighted highest)")
+    p = sub.add_parser("search", help="rank entries against a query (truths weighted highest)")
     p.add_argument("query")
-    p.add_argument("--kind", choices=["question", "diff", "experiment"])
+    p.add_argument("--kind", choices=list(ENTRY_KINDS))
     p.add_argument("--limit", type=int, default=8)
     p.set_defaults(func=cmd_search)
 

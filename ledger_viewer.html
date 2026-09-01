@@ -36,6 +36,8 @@
     --s-open: #403e37;
     --s-answered: #3e6b47;
     --s-parked: #8a8677;
+    --s-active: #3e6b47;
+    --s-deprecated: #8a8677;
     --serif: "Source Serif 4", Georgia, "Times New Roman", serif;
     --sans: "Source Sans 3", system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
     --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
@@ -163,6 +165,8 @@
   .st-open { color: var(--s-open); }
   .st-answered { color: var(--s-answered); }
   .st-parked { color: var(--s-parked); }
+  .st-active { color: var(--s-active); }
+  .st-deprecated { color: var(--s-deprecated); }
 
   @keyframes pulse {
     0%, 100% { background: var(--gold); opacity: 1; }
@@ -430,6 +434,15 @@
   .rowmeta a { color: var(--link); }
   .rsummary { margin-top: 7px; font-size: 13.5px; white-space: pre-wrap; overflow-wrap: anywhere; }
   .rowline { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+
+  /* ---- empirical truths ---- */
+  .truthrow .rtitle { font-weight: 400; }
+  .truthrow .rowhead .grow { flex: 1; }
+  .truthrow.dep .rtitle, .truthrow.dep .twhy { color: var(--muted); }
+  .twhy { display: flex; align-items: baseline; gap: 6px; margin-top: 5px; color: var(--muted); font-size: 13px; }
+  .twhy .txt { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  .twhy .txt.empty { font-style: italic; }
+  .tstamp { margin-top: 7px; font-family: var(--mono); font-size: 10.5px; color: var(--muted); }
   .patchlink {
     background: none;
     border: none;
@@ -572,7 +585,7 @@
   <aside class="side">
     <div class="sidehead">
       <div class="wordmark">Research Dashboard</div>
-      <input id="search" class="search" type="search" placeholder="search questions, diffs, runs…   ( / )" />
+      <input id="search" class="search" type="search" placeholder="search questions, diffs, runs, truths…   ( / )" />
       <div class="filters" id="filters"></div>
       <div class="siderow">
         <button id="refresh" class="btn ghost" title="reload from disk">refresh</button>
@@ -604,6 +617,10 @@ const STATUS_DEFS = {
     { key: "killed", label: "killed" },
     { key: "failed", label: "failed" },
   ],
+  truth: [
+    { key: "active", label: "active" },
+    { key: "deprecated", label: "deprecated" },
+  ],
 };
 const LABEL_OF = {};
 for (const kind of Object.keys(STATUS_DEFS)) {
@@ -611,21 +628,23 @@ for (const kind of Object.keys(STATUS_DEFS)) {
 }
 
 const UNASSIGNED = "__unassigned__";
+const TRUTHS = "__truths__";
 const FEED_LIMIT = 20;
 
 const state = {
   questions: [],
   diffs: [],
   experiments: [],
+  truths: [],
   byId: new Map(),
   generated: "",
   search: "",
-  filters: { question: new Set(), diff: new Set(), experiment: new Set() },
+  filters: { question: new Set(), diff: new Set(), experiment: new Set(), truth: new Set() },
   collapsed: new Set(),
   metricsCache: new Map(), // exp id -> payload from /api/metrics/<id>, or null when there is none
 
   editing: null,
-  selected: null, // null = feed overview, else question id or UNASSIGNED
+  selected: null, // null = feed overview, else question id, UNASSIGNED or TRUTHS
   error: "",
 };
 
@@ -702,6 +721,16 @@ function commitsOf(entry) {
   }
   return out;
 }
+// truth sources are {kind, id} objects; be tolerant of bare id strings
+function sourcesOf(entry) {
+  const raw = Array.isArray(entry.sources) ? entry.sources : [];
+  const out = [];
+  for (const s of raw) {
+    if (typeof s === "string" && s.trim()) out.push({ id: s.trim() });
+    else if (s && typeof s === "object" && s.id) out.push({ kind: s.kind || "", id: String(s.id) });
+  }
+  return out;
+}
 function plural(n, word) {
   return n + " " + word + (n === 1 ? "" : "s");
 }
@@ -741,8 +770,9 @@ async function loadData(showToast) {
     state.questions = tag(data.questions, "question").sort(byUpdated);
     state.diffs = tag(data.diffs, "diff").sort(byUpdated);
     state.experiments = tag(data.experiments, "experiment").sort(byUpdated);
+    state.truths = tag(data.truths, "truth").sort(byUpdated); // "truths" is absent on pre-v7 backends
     state.byId = new Map();
-    for (const e of state.questions.concat(state.diffs, state.experiments)) state.byId.set(e.id, e);
+    for (const e of state.questions.concat(state.diffs, state.experiments, state.truths)) state.byId.set(e.id, e);
     state.generated = data.generated || "";
     state.error = "";
     if (showToast) toast("reloaded " + state.byId.size + " entries");
@@ -764,6 +794,8 @@ function matchesSearch(entry) {
     entry.conclusion,
     entry.results,
     entry.notes,
+    entry.text,
+    entry.why,
     entry.repo,
     entry.worktree,
     entry.branch,
@@ -772,6 +804,7 @@ function matchesSearch(entry) {
     commitsOf(entry).map((c) => c.sha + " " + c.short + " " + c.subject).join("   "),
     (entry.job_ids || []).join(" "),
     listField(entry, "takeaways").join("   "),
+    sourcesOf(entry).map((s) => s.id).join(" "),
     assetsOf(entry).map((a) => (a.label || "") + " " + a.location).join("   "),
     metricSpecsOf(entry).map((m) => (m.label || "") + " " + (m.key || "")).join("   "),
   ];
@@ -806,7 +839,12 @@ function questionKeyOf(entry) {
 }
 
 function anyFilterActive() {
-  return state.filters.question.size || state.filters.diff.size || state.filters.experiment.size;
+  return (
+    state.filters.question.size ||
+    state.filters.diff.size ||
+    state.filters.experiment.size ||
+    state.filters.truth.size
+  );
 }
 
 // ---- selection / hash routing -------------------------------------------------
@@ -814,11 +852,15 @@ function anyFilterActive() {
 function hashKey() {
   const raw = decodeURIComponent(String(location.hash || "").replace(/^#/, "")).trim();
   if (!raw) return null;
-  return raw === "unassigned" ? UNASSIGNED : raw;
+  if (raw === "unassigned") return UNASSIGNED;
+  if (raw === "truths") return TRUTHS;
+  return raw;
 }
 function hashFor(key) {
   if (!key) return "";
-  return key === UNASSIGNED ? "#unassigned" : "#" + encodeURIComponent(key);
+  if (key === UNASSIGNED) return "#unassigned";
+  if (key === TRUTHS) return "#truths";
+  return "#" + encodeURIComponent(key);
 }
 function setSelected(key) {
   state.selected = key || null;
@@ -864,6 +906,7 @@ function renderFilters() {
   group("questions", "question");
   group("diffs", "diff");
   group("runs", "experiment");
+  group("truths", "truth");
   if (anyFilterActive() || state.search) {
     const row = el("div", "fgroup");
     const clear = el("button", "btn ghost", "clear");
@@ -871,6 +914,7 @@ function renderFilters() {
       state.filters.question.clear();
       state.filters.diff.clear();
       state.filters.experiment.clear();
+      state.filters.truth.clear();
       state.search = "";
       searchEl.value = "";
       render();
@@ -951,8 +995,30 @@ async function pushUpdate(id, fields, onError) {
   }
 }
 
+function flashInto(node) {
+  node.scrollIntoView({ behavior: "smooth", block: "center" });
+  node.classList.remove("flash");
+  void node.offsetWidth;
+  node.classList.add("flash");
+}
+
 function scrollToEntry(id) {
   const entry = state.byId.get(id);
+  // questions and truths are their own views, not rows inside a question section
+  if (entry && (entry.kind === "question" || entry.kind === "truth")) {
+    const key = entry.kind === "question" ? entry.id : TRUTHS;
+    state.collapsed.delete(key);
+    if (state.selected !== key) setSelected(key);
+    else render();
+    const target =
+      document.getElementById(entry.kind === "question" ? "q-section-" + entry.id : "row-" + entry.id);
+    if (!target) {
+      toast("that entry is hidden by the current filters", true);
+      return;
+    }
+    flashInto(target);
+    return;
+  }
   const key = questionKeyOf(entry);
   if (state.collapsed.has(key)) state.collapsed.delete(key);
   if (state.selected !== key) setSelected(key);
@@ -962,10 +1028,7 @@ function scrollToEntry(id) {
     toast("that entry is hidden by the current filters", true);
     return;
   }
-  node.scrollIntoView({ behavior: "smooth", block: "center" });
-  node.classList.remove("flash");
-  void node.offsetWidth;
-  node.classList.add("flash");
+  flashInto(node);
 }
 
 function refChip(entry) {
@@ -981,6 +1044,70 @@ function refChip(entry) {
   return btn;
 }
 
+function editKeyOf(entry, field) {
+  return entry.id + ":" + field;
+}
+function isEditing(entry, field) {
+  return !!(state.editing && state.editing.key === editKeyOf(entry, field));
+}
+function editButton(entry, field, value) {
+  const edit = el("button", "iconbtn", "✎");
+  edit.title = "edit " + field;
+  edit.onclick = (ev) => {
+    ev.stopPropagation();
+    state.editing = { key: editKeyOf(entry, field), value: value };
+    render();
+  };
+  return edit;
+}
+
+// textarea + save/cancel for one field; asList edits a list of strings as one-per-line text
+function fieldEditor(entry, field, value, asList) {
+  const ta = el("textarea", "editor");
+  ta.value = state.editing.value !== null ? state.editing.value : value;
+  if (asList) ta.placeholder = "one takeaway per line";
+  ta.oninput = () => {
+    state.editing.value = ta.value;
+  };
+  const save = () => {
+    const next = asList ? ta.value.split("\n").map((l) => l.trim()).filter(Boolean) : ta.value;
+    state.editing = null;
+    const prev = entry[field];
+    entry[field] = next;
+    render();
+    pushUpdate(entry.id, { [field]: next }, () => {
+      entry[field] = prev;
+      render();
+    });
+  };
+  ta.onkeydown = (ev) => {
+    if (ev.key === "Escape") {
+      state.editing = null;
+      render();
+    } else if (ev.key === "Enter" && (ev.metaKey || ev.ctrlKey)) {
+      save();
+    }
+  };
+  const row = el("div", "editrow");
+  const saveBtn = el("button", "btn", "save");
+  saveBtn.onclick = save;
+  const cancel = el("button", "btn ghost", "cancel");
+  cancel.onclick = () => {
+    state.editing = null;
+    render();
+  };
+  row.appendChild(saveBtn);
+  row.appendChild(cancel);
+  row.appendChild(el("span", "hint", (asList ? "one per line · " : "") + "⌘/Ctrl+Enter saves · Esc cancels"));
+  setTimeout(() => {
+    // never steal focus from the search box when a re-render happens with an editor open
+    if (document.activeElement && document.activeElement.tagName === "INPUT") return;
+    ta.focus();
+    ta.setSelectionRange(ta.value.length, ta.value.length);
+  }, 0);
+  return { textarea: ta, controls: row };
+}
+
 // asList: the field is a list of strings edited as one-per-line text (takeaways).
 function editableBlock(entry, field, label, extraClass, asList) {
   const box = el("div", "block" + (extraClass ? " " + extraClass : ""));
@@ -989,68 +1116,16 @@ function editableBlock(entry, field, label, extraClass, asList) {
   if ((extraClass === "conclusion" || extraClass === "takeaways") && value) box.classList.add("filled");
   const head = el("div", "blockhead");
   head.appendChild(el("span", "label grow", label));
-  const editKey = entry.id + ":" + field;
 
-  if (state.editing && state.editing.key === editKey) {
-    const ta = el("textarea", "editor");
-    ta.value = state.editing.value !== null ? state.editing.value : value;
-    if (asList) ta.placeholder = "one takeaway per line";
-    ta.oninput = () => {
-      state.editing.value = ta.value;
-    };
-    const save = () => {
-      const next = asList
-        ? ta.value.split("\n").map((l) => l.trim()).filter(Boolean)
-        : ta.value;
-      state.editing = null;
-      const prev = entry[field];
-      entry[field] = next;
-      render();
-      pushUpdate(entry.id, { [field]: next }, () => {
-        entry[field] = prev;
-        render();
-      });
-    };
-    ta.onkeydown = (ev) => {
-      if (ev.key === "Escape") {
-        state.editing = null;
-        render();
-      } else if (ev.key === "Enter" && (ev.metaKey || ev.ctrlKey)) {
-        save();
-      }
-    };
+  if (isEditing(entry, field)) {
+    const ed = fieldEditor(entry, field, value, asList);
     box.appendChild(head);
-    box.appendChild(ta);
-    const row = el("div", "editrow");
-    const saveBtn = el("button", "btn", "save");
-    saveBtn.onclick = save;
-    const cancel = el("button", "btn ghost", "cancel");
-    cancel.onclick = () => {
-      state.editing = null;
-      render();
-    };
-    row.appendChild(saveBtn);
-    row.appendChild(cancel);
-    const hint = (asList ? "one per line · " : "") + "⌘/Ctrl+Enter saves · Esc cancels";
-    row.appendChild(el("span", "hint", hint));
-    box.appendChild(row);
-    setTimeout(() => {
-      // never steal focus from the search box when a re-render happens with an editor open
-      if (document.activeElement && document.activeElement.tagName === "INPUT") return;
-      ta.focus();
-      ta.setSelectionRange(ta.value.length, ta.value.length);
-    }, 0);
+    box.appendChild(ed.textarea);
+    box.appendChild(ed.controls);
     return box;
   }
 
-  const edit = el("button", "iconbtn", "✎");
-  edit.title = "edit " + field;
-  edit.onclick = (ev) => {
-    ev.stopPropagation();
-    state.editing = { key: editKey, value: value };
-    render();
-  };
-  head.appendChild(edit);
+  head.appendChild(editButton(entry, field, value));
   box.appendChild(head);
   if (asList && items.length) {
     const list = el("ul", "takeaways");
@@ -1664,6 +1739,85 @@ function unassignedSection(diffs, exps) {
   return section;
 }
 
+// ---- empirical truths ---------------------------------------------------------
+
+function truthRow(entry) {
+  const row = el("div", "row truthrow" + (entry.status === "deprecated" ? " dep" : ""));
+  row.id = "row-" + entry.id;
+
+  const head = el("div", "rowhead");
+  head.appendChild(statusTag(entry, true));
+  const text = entry.text || "";
+  if (isEditing(entry, "text")) {
+    head.appendChild(el("span", "label grow", "truth"));
+    row.appendChild(head);
+    const ed = fieldEditor(entry, "text", text);
+    row.appendChild(ed.textarea);
+    row.appendChild(ed.controls);
+  } else {
+    head.appendChild(el("span", "rtitle", text || "— empty truth —"));
+    head.appendChild(editButton(entry, "text", text));
+    row.appendChild(head);
+  }
+
+  const why = entry.why || "";
+  if (isEditing(entry, "why")) {
+    const label = el("div", "blockhead");
+    label.appendChild(el("span", "label grow", "why"));
+    row.appendChild(label);
+    const ed = fieldEditor(entry, "why", why);
+    row.appendChild(ed.textarea);
+    row.appendChild(ed.controls);
+  } else {
+    const line = el("div", "twhy");
+    line.appendChild(el("span", "txt" + (why ? "" : " empty"), why || "— no why —"));
+    line.appendChild(editButton(entry, "why", why));
+    row.appendChild(line);
+  }
+
+  const tags = entry.tags || [];
+  if (tags.length) {
+    const line = el("div", "rowline");
+    for (const t of tags) line.appendChild(el("span", "tag", "#" + t));
+    row.appendChild(line);
+  }
+
+  const sources = sourcesOf(entry);
+  if (sources.length) {
+    const line = el("div", "rowline");
+    line.appendChild(el("span", "label", "sources"));
+    for (const s of sources) line.appendChild(refChip(state.byId.get(s.id)));
+    row.appendChild(line);
+  }
+
+  row.appendChild(el("div", "tstamp", "updated " + fmtStamp(entry.updated)));
+  return row;
+}
+
+function truthsView(host) {
+  const section = el("section", "q");
+  section.id = "q-section-truths";
+  const head = el("div", "qhead");
+  const main = el("div", "qmain");
+  main.appendChild(el("h2", "qtitle", "Empirical truths"));
+  head.appendChild(main);
+  section.appendChild(head);
+  section.appendChild(
+    el("p", "qsummary", "practices and gotchas that hold across research questions — promoted from takeaways")
+  );
+
+  const visible = state.truths.filter((t) => passesStatus(t) && matchesSearch(t));
+  const active = visible.filter((t) => t.status !== "deprecated");
+  const deprecated = visible.filter((t) => t.status === "deprecated");
+  if (active.length) section.appendChild(subList("truths", active, truthRow));
+  if (deprecated.length) section.appendChild(subList("deprecated", deprecated, truthRow));
+  if (!visible.length) {
+    const note = state.truths.length ? "no truths match the filters" : "no truths yet";
+    section.appendChild(el("div", "none", note));
+  }
+  host.appendChild(section);
+}
+
 async function openPatch(entry) {
   const bg = el("div", "modalbg");
   const modal = el("div", "modal");
@@ -1780,6 +1934,15 @@ function renderNav() {
   navEl.textContent = "";
   navEl.appendChild(
     navItem(null, { glyph: "⌂", title: "feed", muted: !!state.selected })
+  );
+  const nActive = state.truths.filter((t) => t.status !== "deprecated" && matchesSearch(t)).length;
+  navEl.appendChild(
+    navItem(TRUTHS, {
+      glyph: "★",
+      title: "empirical truths",
+      count: nActive + " active",
+      muted: state.selected !== TRUTHS,
+    })
   );
   navEl.appendChild(el("div", "navrule"));
 
@@ -1901,6 +2064,8 @@ function render() {
 
   if (isFeed) {
     feedView(inner);
+  } else if (state.selected === TRUTHS) {
+    truthsView(inner);
   } else if (state.selected === UNASSIGNED) {
     const loose = looseChildren();
     inner.appendChild(unassignedSection(loose.diffs, loose.exps));

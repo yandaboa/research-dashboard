@@ -11,27 +11,35 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from fetch_metrics import parse_run_url  # noqa: E402
 from ledger import (  # noqa: E402
+    ENTRY_KINDS,
     EXP_STATUSES,
     QUESTION_STATUSES,
+    TRUTH_STATUSES,
     add_asset,
     add_commits,
     add_metric,
+    add_source,
     append_dedup,
     assert_question_exists,
     atomic_write,
     capture_diff,
     commits_since_trunk,
+    create_truth,
     detect_worktree,
+    display_title,
     ensure_root,
     entry_path,
     format_commit_line,
     ledger_root,
     load_all,
     load_entry,
+    make_source,
     now_ts,
     resolve_commits,
+    resolve_takeaway,
     search_entries,
     slugify,
+    statuses_for,
     subdirs,
     unique_id,
     where_column,
@@ -60,18 +68,28 @@ METRICS_MISSING = (
     "ledger_update(id=..., add_metrics=[{run_url, key, label}]) as soon as the run reports."
 )
 
-BREVITY_LIMITS = {"title": 70, "summary": 240, "results": 240, "conclusion": 400, "takeaway": 160, "notes": 240}
+BREVITY_LIMITS = {
+    "title": 70,
+    "summary": 240,
+    "results": 240,
+    "conclusion": 400,
+    "takeaway": 160,
+    "notes": 240,
+    "text": 160,
+    "why": 200,
+}
 
 
 def brevity_warnings(args: dict) -> list[str]:
     """Length warnings for prose fields — the user reads dozens of entries; verbosity is a defect."""
     warnings = []
-    for field in ("title", "summary", "results", "conclusion"):
+    for field in ("title", "summary", "results", "conclusion", "text", "why"):
         value = args.get(field)
         if isinstance(value, str) and len(value) > BREVITY_LIMITS[field]:
+            fixer = "ledger_edit_truth" if field in ("text", "why") else "ledger_update"
             warnings.append(
                 f"TOO VERBOSE: {field} is {len(value)} chars (limit ~{BREVITY_LIMITS[field]}). "
-                f"Rewrite it shorter with ledger_update — the user scans dozens of entries."
+                f"Rewrite it shorter with {fixer} — the user scans dozens of entries."
             )
     takeaways = args.get("add_takeaways")
     if isinstance(takeaways, list):
@@ -99,6 +117,7 @@ BREVITY (hard rule — the user scans dozens of entries every morning)
     results     numbers first, one clause of interpretation (<= ~240 chars)
     conclusion  <= 3 short sentences
     takeaway    ONE declarative fact, <= ~160 chars
+    truth text  ONE declarative fact/practice, <= ~160 chars; why <= ~200 chars
   Write like a lab notebook margin, not a report.
 
 HIERARCHY
@@ -118,13 +137,17 @@ ENTRY KINDS
   experiment  one run (or one tightly-coupled set of runs). Fields: id, title, summary,
               question_id, diff_ids[], status, cluster, job_ids[], wandb[], results, tags[],
               assets[]. status: planned | running | done | killed | failed -- agents keep current.
+  truth       one cross-cutting best practice or gotcha in the Empirical Truths Archive. Fields:
+              id, text, why, status, tags[], sources[]. status: active | deprecated. See EMPIRICAL
+              TRUTHS ARCHIVE below.
 
 LIFECYCLE
   1. The user hands the session a research question or an experiment to run.
   2. SEARCH FIRST: ledger_search with 2-3 phrasings of the topic before doing any work. Read the
-     takeaways of the matching questions -- they are prior findings that should change your plan.
-     Best practice: spawn a background subagent (the Explore agent) to run the searches and report
-     back, so the searching does not eat the main thread's context.
+     [TRUTH] hits first -- they are the curated cross-cutting practices -- then the takeaways of the
+     matching questions. Both are prior findings that should change your plan. Best practice: spawn
+     a background subagent (the Explore agent) to run the searches and report back, so the
+     searching does not eat the main thread's context.
   3. Find or create the question. Reuse the existing question if the work belongs to that line;
      ledger_add_question only for a genuinely new line.
   4. Attach the work as it is produced: ledger_add_diff(question_id=...) per coherent change,
@@ -134,8 +157,8 @@ LIFECYCLE
   5. Keep it current: ledger_update the experiment's status + results as jobs finish or die, and
      the question's conclusion as evidence comes in (status="answered" when settled, "parked" if
      the line is dropped).
-  6. When a finding stabilizes, distill it into takeaways with
-     ledger_update(add_takeaways=[...]).
+  6. When a finding stabilizes, distill it into takeaways with ledger_update(add_takeaways=[...]).
+     If it holds beyond this question, promote it with ledger_promote_takeaway.
   7. Review status and notes on diffs are the user's, set in the GUI. Never write them.
 
 TAKEAWAYS
@@ -148,6 +171,25 @@ TAKEAWAYS
     bad:  anything over ~160 chars — split it or cut it
   Grow the list with add_takeaways; rewrite the whole list (e.g. to slim it) with takeaways=[...].
   conclusion is the narrative; a takeaway is the fact extracted from it.
+
+EMPIRICAL TRUTHS ARCHIVE
+  The curated list of things that hold ACROSS research lines: infra gotchas, recipes that always
+  work, things that never work, hard rules about how to run this lab's code. It is the first thing
+  the search-first step should surface, and the [TRUTH] blocks in ledger_search are it.
+    belongs there: "Every torch.load of a reset-state dataset needs map_location='cpu'; GPU-saved
+                    tensors hang Isaac's first env.reset()."
+                   "Camera envs need --enable_cameras or Isaac Sim crashes at the first spawn."
+    does NOT:      results of one question ("shared trunk fixed collapse on the PC run") -- that is
+                   a takeaway on that question, not a truth.
+  Rules:
+    * Search before adding (ledger_search). If a truth already covers it, ledger_edit_truth it --
+      never add a near-duplicate.
+    * One fact per truth: text <= ~160 chars, why <= ~200 chars (the mechanism or the evidence).
+    * Promote, don't retype: a takeaway that turns out to generalize goes in via
+      ledger_promote_takeaway(question_id, takeaway) -- it keeps a source link back to the question.
+    * sources[] cite the ledger entries the truth came from; they must exist.
+    * Overturned? ledger_edit_truth(status="deprecated") -- deprecate, never delete. Say what
+      changed in the replacement truth's why.
 
 ASSETS
   {label, location} on any entry. location is a path, URL, wandb link, checkpoint, zarr, video.
@@ -221,15 +263,19 @@ EXAMPLE SEQUENCE
                                   "plus LR warmup holds 0.95-0.97 success."])
 
 TOOLS
-  ledger_guide           this text
-  ledger_search          full-text search over questions (takeaways weighted highest), diffs, exps
-  ledger_add_question    open a research line (search first; find-or-create)
-  ledger_add_diff        record a code change as commit links, linked to a question
-  ledger_add_experiment  record a run, linked to a question and diff ids
-  ledger_add_asset       attach an artifact (checkpoint, video, plot, wandb) to any entry
-  ledger_update          status/results/conclusion, add_takeaways, add_metrics, add_commits, jobs, tags
-  ledger_list            browse entries (filter by kind/status/worktree/query)
-  ledger_show            full JSON for one entry (commit links for diffs)
+  ledger_guide             this text
+  ledger_search            full-text search over truths (weighted highest), questions and their
+                           takeaways, diffs, experiments
+  ledger_add_question      open a research line (search first; find-or-create)
+  ledger_add_diff          record a code change as commit links, linked to a question
+  ledger_add_experiment    record a run, linked to a question and diff ids
+  ledger_add_asset         attach an artifact (checkpoint, video, plot, wandb) to any entry
+  ledger_add_truth         add a cross-cutting practice/gotcha to the Empirical Truths Archive
+  ledger_edit_truth        edit a truth, or deprecate one that has been overturned
+  ledger_promote_takeaway  promote a question's takeaway into a truth (keeps the source link)
+  ledger_update            status/results/conclusion, add_takeaways, add_metrics, add_commits, jobs, tags
+  ledger_list              browse entries (filter by kind/status/worktree/query)
+  ledger_show              full JSON for one entry (commit links for diffs)
 """
 
 TOOLS = [
@@ -456,7 +502,7 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "kind": {"type": "string", "enum": ["question", "diff", "experiment"]},
+                "kind": {"type": "string", "enum": list(ENTRY_KINDS)},
                 "status": {"type": "string"},
                 "worktree": {"type": "string", "description": "diff entries only: worktree name"},
                 "query": {"type": "string", "description": "case-insensitive substring over id/title/summary/tags"},
@@ -484,17 +530,84 @@ TOOLS = [
         },
     },
     {
+        "name": "ledger_add_truth",
+        "description": (
+            "Add a cross-cutting best practice or gotcha to the Empirical Truths Archive — things that hold "
+            "beyond one research question (infra gotchas, recipes that always work, things that never work). "
+            "One fact per truth, <= ~160 chars. Search first (ledger_search) to avoid duplicates; if a truth "
+            "already exists, edit it instead."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "ONE declarative fact or practice, <= ~160 chars"},
+                "why": {"type": "string", "description": "one-line mechanism or evidence, <= ~200 chars"},
+                "tags": {"type": "array", "items": {"type": "string"}},
+                "sources": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "ids of the ledger entries this came from (q-…, exp-…, diff id); must exist",
+                },
+            },
+            "required": ["text"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "ledger_edit_truth",
+        "description": (
+            "Edit a truth in the Empirical Truths Archive, or retire it. Prefer editing an existing truth "
+            "over adding a near-duplicate. When a truth is overturned, set status='deprecated' rather than "
+            "deleting it, and put what changed in the replacement truth's why."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "id": {"type": "string", "description": "truth id (t-…)"},
+                "text": {"type": "string"},
+                "why": {"type": "string"},
+                "status": {"type": "string", "enum": list(TRUTH_STATUSES)},
+                "add_tags": {"type": "array", "items": {"type": "string"}},
+                "add_sources": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "ledger entry ids to cite as evidence; must exist",
+                },
+            },
+            "required": ["id"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "ledger_promote_takeaway",
+        "description": (
+            "Promote a question's takeaway into the Empirical Truths Archive once it turns out to hold beyond "
+            "that question. The takeaway stays on the question; the new truth links back to it as a source."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "question_id": {"type": "string"},
+                "takeaway": {"type": "string", "description": "exact takeaway text, or its 1-based index"},
+                "why": {"type": "string", "description": "one-line mechanism or evidence"},
+                "tags": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["question_id", "takeaway"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "ledger_search",
         "description": (
-            "Search the accumulated research knowledge base — past research questions, their stable "
-            "takeaways, experiments, and diffs. Call before starting new work on a topic and cite what you "
-            "find."
+            "Search the accumulated research knowledge base — the Empirical Truths Archive (cross-cutting "
+            "practices and gotchas), past research questions and their stable takeaways, experiments, and "
+            "diffs. Call before starting new work on a topic and cite what you find."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "query": {"type": "string", "description": "free text; try 2-3 phrasings of the topic"},
-                "kind": {"type": "string", "enum": ["question", "diff", "experiment"]},
+                "kind": {"type": "string", "enum": list(ENTRY_KINDS)},
                 "limit": {"type": "integer", "minimum": 1, "description": "default 8"},
             },
             "required": ["query"],
@@ -561,13 +674,13 @@ def as_metrics(args: dict, key: str) -> list[dict]:
 
 
 def assert_diffs_exist(root: str, diff_ids: list[str]) -> None:
-    _, diffs_dir, _, _ = subdirs(root)
+    diffs_dir = subdirs(root)[1]
     for diff_id in diff_ids:
         assert os.path.exists(os.path.join(diffs_dir, f"{diff_id}.json")), f"unknown diff id: {diff_id}"
 
 
 def question_takeaways(root: str, question_id: str) -> list[str]:
-    questions_dir, _, _, _ = subdirs(root)
+    questions_dir = subdirs(root)[0]
     path = os.path.join(questions_dir, f"{question_id}.json")
     if not os.path.exists(path):
         return []
@@ -587,7 +700,7 @@ def tool_add_question(args: dict) -> str:
     status = as_str(args, "status", default="open")
     assert status in QUESTION_STATUSES, f"status must be one of {QUESTION_STATUSES}"
 
-    questions_dir, _, _, _ = subdirs(root)
+    questions_dir = subdirs(root)[0]
     entry_id = unique_id(root, f"q-{slugify(title)}")
 
     ts = now_ts()
@@ -635,7 +748,7 @@ def tool_add_diff(args: dict) -> str:
     )
     commits = resolve_commits(repo_dir, refs)
 
-    _, diffs_dir, _, _ = subdirs(root)
+    diffs_dir = subdirs(root)[1]
     entry_id = unique_id(root, f"{datetime.now().strftime('%Y-%m-%d')}-{slugify(title)}")
 
     repo, worktree, branch = detect_worktree(repo_dir)
@@ -691,7 +804,7 @@ def tool_add_experiment(args: dict) -> str:
     assert_diffs_exist(root, diff_ids)
     metrics = as_metrics(args, "metrics")
 
-    _, _, exp_dir, _ = subdirs(root)
+    exp_dir = subdirs(root)[2]
     entry_id = unique_id(root, f"exp-{datetime.now().strftime('%Y-%m-%d')}-{slugify(title)}")
 
     ts = now_ts()
@@ -743,7 +856,7 @@ def tool_update(args: dict) -> str:
         assert kind != "diff", (
             "review status and notes on a diff are set by the user in the ledger GUI; agents cannot change them"
         )
-        allowed = QUESTION_STATUSES if kind == "question" else EXP_STATUSES
+        allowed = statuses_for(kind)
         assert status in allowed, f"status for a {kind} must be one of {allowed}"
         entry["status"] = status
     title = as_str(args, "title")
@@ -826,12 +939,78 @@ def tool_add_asset(args: dict) -> str:
     return f"{entry_id}: {len(entry['assets'])} asset(s)\n{listing}"
 
 
+def truth_block(entry: dict) -> str:
+    lines = [f"[TRUTH] {entry.get('id', '')}  ({entry.get('status', 'active')})", f"  {entry.get('text', '')}"]
+    if entry.get("why"):
+        lines.append(f"  why: {entry['why']}")
+    if entry.get("tags"):
+        lines.append(f"  tags: {', '.join(entry['tags'])}")
+    sources = [s.get("id", "") for s in (entry.get("sources") or []) if isinstance(s, dict)]
+    if sources:
+        lines.append(f"  sources: {', '.join(sources)}")
+    return "\n".join(lines)
+
+
+def tool_add_truth(args: dict) -> str:
+    root = ledger_root()
+    ensure_root(root)
+    text = as_str(args, "text", required=True)
+    assert text.strip(), "text must not be empty: state ONE fact or practice"
+    why = as_str(args, "why", default="") or ""
+    entry_id = create_truth(root, text, why, as_list(args, "tags"), as_list(args, "sources"))
+    path = entry_path(root, entry_id)
+    return "\n".join([truth_block(load_entry(path)), *brevity_warnings(args)])
+
+
+def tool_edit_truth(args: dict) -> str:
+    root = ledger_root()
+    entry_id = as_str(args, "id", required=True)
+    path = os.path.join(subdirs(root)[3], f"{entry_id}.json")
+    assert os.path.exists(path), f"no truth with id {entry_id}"
+    entry = load_entry(path)
+
+    text = as_str(args, "text")
+    if text is not None:
+        assert text.strip(), "text must not be empty"
+        entry["text"] = text.strip()
+    why = as_str(args, "why")
+    if why is not None:
+        entry["why"] = why.strip()
+    status = as_str(args, "status")
+    if status is not None:
+        assert status in TRUTH_STATUSES, f"status must be one of {TRUTH_STATUSES}"
+        entry["status"] = status
+    add_tags = as_list(args, "add_tags")
+    if add_tags:
+        append_dedup(entry, "tags", add_tags)
+    for source_id in as_list(args, "add_sources"):
+        add_source(entry, make_source(root, source_id))
+
+    entry["updated"] = now_ts()
+    write_entry(path, entry)
+    return "\n".join([truth_block(entry), *brevity_warnings(args)])
+
+
+def tool_promote_takeaway(args: dict) -> str:
+    root = ledger_root()
+    question_id = as_str(args, "question_id", required=True)
+    selector = as_str(args, "takeaway", required=True)
+    path = os.path.join(subdirs(root)[0], f"{question_id}.json")
+    assert os.path.exists(path), f"no question with id {question_id}"
+    question = load_entry(path)
+    text = resolve_takeaway(question, selector)
+    why = as_str(args, "why", default="") or ""
+    entry_id = create_truth(root, text, why, as_list(args, "tags"), [question_id])
+    truth = load_entry(entry_path(root, entry_id))
+    return "\n".join([truth_block(truth), f"promoted from {question_id} (the takeaway stays on the question)"])
+
+
 def tool_search(args: dict) -> str:
     root = ledger_root()
     query = as_str(args, "query", required=True)
     assert query.strip(), "query must not be empty"
     kind = as_str(args, "kind")
-    assert kind in (None, "question", "diff", "experiment"), "kind must be 'question', 'diff' or 'experiment'"
+    assert kind in (None, *ENTRY_KINDS), f"kind must be one of {ENTRY_KINDS}"
     limit = args.get("limit", 8)
     assert isinstance(limit, int) and not isinstance(limit, bool), "limit must be an integer"
     assert limit > 0, "limit must be positive"
@@ -845,6 +1024,9 @@ def tool_search(args: dict) -> str:
 
     blocks = []
     for entry, score, snippets in hits:
+        if entry.get("kind") == "truth":
+            blocks.append(f"[{score}] {truth_block(entry)}")
+            continue
         lines = [
             f"[{score}] {entry.get('id', '')}  {entry.get('kind', '')}/{entry.get('status', '')}",
             f"  {entry.get('title', '')}",
@@ -864,6 +1046,8 @@ def matches_query(entry: dict, query: str) -> bool:
             str(entry.get("id", "")),
             str(entry.get("title", "")),
             str(entry.get("summary", "")),
+            str(entry.get("text", "")),
+            str(entry.get("why", "")),
             " ".join(entry.get("tags") or []),
         ]
     ).lower()
@@ -873,7 +1057,7 @@ def matches_query(entry: dict, query: str) -> bool:
 def tool_list(args: dict) -> str:
     root = ledger_root()
     kind = as_str(args, "kind")
-    assert kind in (None, "question", "diff", "experiment"), "kind must be 'question', 'diff' or 'experiment'"
+    assert kind in (None, *ENTRY_KINDS), f"kind must be one of {ENTRY_KINDS}"
     status = as_str(args, "status")
     worktree = as_str(args, "worktree")
     query = as_str(args, "query")
@@ -898,7 +1082,7 @@ def tool_list(args: dict) -> str:
     shown = entries[:limit]
     rows = []
     for e in shown:
-        title = e.get("title", "")
+        title = display_title(e)
         rows.append(
             (
                 e.get("id", ""),
@@ -943,6 +1127,9 @@ HANDLERS = {
     "ledger_add_diff": tool_add_diff,
     "ledger_add_experiment": tool_add_experiment,
     "ledger_add_asset": tool_add_asset,
+    "ledger_add_truth": tool_add_truth,
+    "ledger_edit_truth": tool_edit_truth,
+    "ledger_promote_takeaway": tool_promote_takeaway,
     "ledger_search": tool_search,
     "ledger_update": tool_update,
     "ledger_list": tool_list,

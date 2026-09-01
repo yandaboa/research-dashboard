@@ -15,7 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ledger import atomic_write, ledger_root, metrics_dir, now_ts, statuses_for, subdirs  # noqa: E402
 
 VIEWER_HTML = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ledger_viewer.html")
-EDITABLE_FIELDS = ("status", "notes", "results", "conclusion", "summary", "title", "takeaways")
+EDITABLE_FIELDS = ("status", "notes", "results", "conclusion", "summary", "title", "takeaways", "text", "why")
 LIST_FIELDS = ("takeaways",)  # edited as one-per-line text in the GUI, posted as a list
 
 
@@ -35,7 +35,7 @@ def load_dir(path: str) -> list[dict]:
 
 
 def find_entry(root: str, entry_id: str) -> tuple[str, dict] | tuple[None, None]:
-    for d in subdirs(root)[:3]:
+    for d in subdirs(root)[:4]:
         path = os.path.join(d, f"{entry_id}.json")
         if os.path.exists(path):
             try:
@@ -78,11 +78,12 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/data":
-            questions_dir, diffs_dir, exp_dir, _ = subdirs(self.root)
+            questions_dir, diffs_dir, exp_dir, truths_dir, _ = subdirs(self.root)
             payload = {
                 "questions": load_dir(questions_dir),
                 "diffs": load_dir(diffs_dir),
                 "experiments": load_dir(exp_dir),
+                "truths": load_dir(truths_dir),
                 "generated": now_ts(),
             }
             self._send_json(200, payload)

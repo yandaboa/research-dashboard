@@ -179,7 +179,7 @@ def sweep_experiment(root: str, entry: dict, samples: int, force: bool) -> str:
 def cmd_sweep(args: argparse.Namespace) -> None:
     root = args.root or ledger_root()
     assert os.path.isdir(root), f"ledger root does not exist: {root}"
-    _, _, exp_dir, _ = subdirs(root)
+    exp_dir = subdirs(root)[2]
     for entry in load_dir_entries(exp_dir):
         if not entry_metrics(entry):
             continue
