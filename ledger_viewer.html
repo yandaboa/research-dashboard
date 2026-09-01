@@ -1693,10 +1693,26 @@ async function openPatch(entry) {
 // worktree keeps its color across sessions; the chip always carries the name (never color alone)
 const WT_PALETTE = ["#2F6F7E", "#6B4C8A", "#3D5A99", "#B4632B", "#6B7A2B", "#9A3F6E", "#7A5230", "#4F6D7A"];
 
+let WT_COLORS = new Map();
+
+// hash picks the preferred slot, linear probing over the known worktree set avoids collisions
+function assignWtColors() {
+  const names = Array.from(new Set(state.diffs.map((d) => d.worktree).filter(Boolean))).sort();
+  WT_COLORS = new Map();
+  const used = new Set();
+  for (const name of names) {
+    let h = 0;
+    for (const ch of name) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+    let i = h % WT_PALETTE.length;
+    for (let k = 0; k < WT_PALETTE.length && used.has(i); k++) i = (i + 1) % WT_PALETTE.length;
+    used.add(i);
+    WT_COLORS.set(name, WT_PALETTE[i]);
+  }
+}
+
 function wtColor(name) {
-  let h = 0;
-  for (const ch of String(name)) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
-  return WT_PALETTE[h % WT_PALETTE.length];
+  if (!WT_COLORS.has(name)) assignWtColors();
+  return WT_COLORS.get(name) || WT_PALETTE[0];
 }
 
 function worktreeOfQuestion(qid) {
@@ -1841,6 +1857,7 @@ function feedView(host) {
 // ---- render -------------------------------------------------------------------
 
 function render() {
+  assignWtColors();
   renderFilters();
   const total = state.byId.size;
   stampEl.textContent = state.error
