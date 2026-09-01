@@ -430,33 +430,30 @@
   .rowmeta a { color: var(--link); }
   .rsummary { margin-top: 7px; font-size: 13.5px; white-space: pre-wrap; overflow-wrap: anywhere; }
   .rowline { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
-  .filestoggle {
+  .patchlink {
     background: none;
     border: none;
     padding: 0;
-    color: var(--muted);
-    font-size: 11px;
-    letter-spacing: 0.05em;
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-  }
-  .filestoggle:hover { color: var(--ink); }
-  .filestoggle .car { display: inline-block; transition: transform 0.15s; font-size: 9px; }
-  .filestoggle.open .car { transform: rotate(90deg); }
-  ul.files {
-    list-style: none;
-    margin: 7px 0 0;
-    padding: 7px 10px;
-    border: 1px solid var(--rule);
-    border-radius: 3px;
-    max-height: 220px;
-    overflow: auto;
     font-family: var(--mono);
-    font-size: 11px;
+    font-size: 10.5px;
+    letter-spacing: 0.05em;
     color: var(--muted);
   }
-  ul.files li { padding: 1px 0; overflow-wrap: anywhere; }
+  .patchlink:hover { color: var(--ink); text-decoration: underline; }
+  ul.commits { list-style: none; margin: 8px 0 0; padding: 0; }
+  ul.commits li { display: flex; align-items: baseline; gap: 8px; min-width: 0; padding: 1px 0; }
+  .csha { flex: none; font-family: var(--mono); font-size: 11px; }
+  span.csha { color: var(--muted); }
+  .csha .arrow { font-size: 9px; opacity: 0.7; margin-left: 3px; }
+  .csubj {
+    flex: 1;
+    min-width: 0;
+    color: var(--muted);
+    font-size: 12.5px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
   button.ref {
     display: inline-flex;
     align-items: center;
@@ -624,7 +621,6 @@ const state = {
   generated: "",
   search: "",
   filters: { question: new Set(), diff: new Set(), experiment: new Set() },
-  openFiles: new Set(),
   collapsed: new Set(),
   metricsCache: new Map(), // exp id -> payload from /api/metrics/<id>, or null when there is none
 
@@ -682,6 +678,29 @@ function listField(entry, field) {
 }
 function assetsOf(entry) {
   return Array.isArray(entry.assets) ? entry.assets.filter((a) => a && a.location) : [];
+}
+// commits are {sha, short, subject, url} objects; legacy entries hold plain sha strings
+function commitsOf(entry) {
+  const raw = Array.isArray(entry.commits) ? entry.commits : [];
+  const out = [];
+  for (const c of raw) {
+    if (typeof c === "string") {
+      const sha = c.trim();
+      if (sha) out.push({ sha: sha, short: sha.slice(0, 7), subject: "", url: "" });
+    } else if (c && typeof c === "object") {
+      const sha = String(c.sha || "");
+      const short = String(c.short || sha.slice(0, 7));
+      if (sha || short) {
+        out.push({
+          sha: sha,
+          short: short,
+          subject: String(c.subject || ""),
+          url: typeof c.url === "string" ? c.url : "",
+        });
+      }
+    }
+  }
+  return out;
 }
 function plural(n, word) {
   return n + " " + word + (n === 1 ? "" : "s");
@@ -750,7 +769,7 @@ function matchesSearch(entry) {
     entry.branch,
     entry.cluster,
     (entry.tags || []).join(" "),
-    (entry.commits || []).join(" "),
+    commitsOf(entry).map((c) => c.sha + " " + c.short + " " + c.subject).join("   "),
     (entry.job_ids || []).join(" "),
     listField(entry, "takeaways").join("   "),
     assetsOf(entry).map((a) => (a.label || "") + " " + a.location).join("   "),
@@ -1439,49 +1458,52 @@ function diffRow(entry) {
   const meta = el("div", "rowmeta");
   const where = [entry.repo, entry.worktree].filter(Boolean).join("/");
   if (where) metaText(meta, where + (entry.branch ? " · " + entry.branch : ""));
-  for (const c of entry.commits || []) {
-    if (meta.childNodes.length) metaSep(meta);
-    metaText(meta, String(c).slice(0, 7));
-  }
   for (const t of entry.tags || []) {
     if (meta.childNodes.length) metaSep(meta);
     metaText(meta, "#" + t);
   }
   if (meta.childNodes.length) metaSep(meta);
   metaText(meta, fmtStamp(entry.updated));
+  if (entry.patch) {
+    metaSep(meta);
+    const patchBtn = el("button", "patchlink", "patch");
+    patchBtn.title = "view the captured patch";
+    patchBtn.onclick = (ev) => {
+      ev.stopPropagation();
+      openPatch(entry);
+    };
+    meta.appendChild(patchBtn);
+  }
   row.appendChild(meta);
 
   if (entry.summary) row.appendChild(el("div", "rsummary", entry.summary));
+  const commits = commitsOf(entry);
+  if (commits.length) {
+    const list = el("ul", "commits");
+    for (const c of commits) {
+      const li = el("li");
+      if (c.url) {
+        const link = document.createElement("a");
+        link.className = "csha";
+        link.href = c.url;
+        link.target = "_blank";
+        link.rel = "noreferrer";
+        link.title = c.sha || c.short;
+        link.appendChild(el("span", null, c.short));
+        link.appendChild(el("span", "arrow", "↗"));
+        li.appendChild(link);
+      } else {
+        const sha = el("span", "csha", c.short);
+        sha.title = c.sha || c.short;
+        li.appendChild(sha);
+      }
+      if (c.subject) li.appendChild(el("span", "csubj", c.subject));
+      list.appendChild(li);
+    }
+    row.appendChild(list);
+  }
   const assets = assetsLine(entry);
   if (assets) row.appendChild(assets);
-
-  const files = entry.files || [];
-  if (files.length || entry.patch) {
-    const line = el("div", "rowline");
-    if (files.length) {
-      const open = state.openFiles.has(entry.id);
-      const toggle = el("button", "filestoggle" + (open ? " open" : ""));
-      toggle.appendChild(el("span", "car", "▸"));
-      toggle.appendChild(el("span", null, files.length + (files.length === 1 ? " file" : " files")));
-      toggle.onclick = () => {
-        if (open) state.openFiles.delete(entry.id);
-        else state.openFiles.add(entry.id);
-        render();
-      };
-      line.appendChild(toggle);
-    }
-    if (entry.patch) {
-      const btn = el("button", "btn ghost", "patch");
-      btn.onclick = () => openPatch(entry);
-      line.appendChild(btn);
-    }
-    row.appendChild(line);
-    if (files.length && state.openFiles.has(entry.id)) {
-      const list = el("ul", "files");
-      for (const f of files) list.appendChild(el("li", null, f));
-      row.appendChild(list);
-    }
-  }
 
   const linked = state.experiments.filter((e) => (e.diff_ids || []).includes(entry.id));
   if (linked.length) {

@@ -14,18 +14,22 @@ from ledger import (  # noqa: E402
     EXP_STATUSES,
     QUESTION_STATUSES,
     add_asset,
+    add_commits,
     add_metric,
     append_dedup,
     assert_question_exists,
     atomic_write,
     capture_diff,
+    commits_since_trunk,
     detect_worktree,
     ensure_root,
     entry_path,
+    format_commit_line,
     ledger_root,
     load_all,
     load_entry,
     now_ts,
+    resolve_commits,
     search_entries,
     slugify,
     subdirs,
@@ -106,10 +110,11 @@ ENTRY KINDS
               takeaways[], tags[], assets[]. status: open | answered | parked -- agents keep this
               current. conclusion: the evolving answer narrative, updated as evidence comes in.
               takeaways: the stable distilled findings (see TAKEAWAYS below).
-  diff        one coherent code change. Fields: id, title, summary, question_id, repo, worktree,
-              branch, commits[], files[], patch (stored under patches/), status, notes, tags[],
-              assets[]. status: unreviewed | questionable | known_good -- SET BY THE USER, not by
-              agents. notes: also the user's. Agents never write status or notes on a diff.
+  diff        one coherent code change, recorded as GitHub commit links. Fields: id, title, summary,
+              question_id, repo, worktree, branch, commits[] ({sha, short, subject, url}), status,
+              notes, tags[], assets[]; files[]/patch stay empty unless a capture was requested.
+              status: unreviewed | questionable | known_good -- SET BY THE USER, not by agents.
+              notes: also the user's. Agents never write status or notes on a diff.
   experiment  one run (or one tightly-coupled set of runs). Fields: id, title, summary,
               question_id, diff_ids[], status, cluster, job_ids[], wandb[], results, tags[],
               assets[]. status: planned | running | done | killed | failed -- agents keep current.
@@ -161,11 +166,12 @@ METRICS
 CONVENTIONS
   * One question per research line, not per run. Near-duplicate questions make the dashboard
     useless -- ledger_search before creating.
-  * One ledger_add_diff per coherent change, written when the change is complete, not per file.
-    summary is required: say what changed and why, in a couple of sentences an outside reader can
-    follow. Do not paste the diff -- the patch is captured for you.
+  * One ledger_add_diff per coherent change, not per file. Commit the work FIRST, then register the
+    shas: commits=["<sha>", ...] or commits="auto" (everything on the branch since main). The
+    commits are the content of a diff entry. files[]/patch are captured only when the user asks for
+    an uncommitted snapshot (capture="working"|"branch"). Keep summary to one line.
   * repo_dir must be the absolute path of the worktree the change lives in. Git repo, branch and
-    the patch are captured from there.
+    the commit shas/subjects/urls are resolved there.
   * Always link an experiment to the diff(s) it exercises via diff_ids. An experiment with no diff
     is only correct when nothing in the tree changed.
   * Keep experiment status current. A stale "running" for a job that died days ago is worse than
@@ -186,7 +192,7 @@ EXAMPLE SEQUENCE
                              "privileged critics collapsed on PC obs. Adds critic_design flag.",
                      repo_dir="/home/yandabao/UWLab-patrick-private/.claude/worktrees/incontext",
                      question_id="q-does-a-shared-trunk-critic-fix-value-collapse-on-pc-obs",
-                     capture="working", tags=["rl","in-context"])
+                     commits="auto", tags=["rl","in-context"])
      -> 2026-08-31-shared-trunk-critic-for-in-context-ppo
   4. ledger_add_experiment(title="ctx16 PC bias, shared-trunk critic",
                            summary="Two seeds on Tillicum, 16-step context, obs-bias POMDP; tests "
@@ -218,12 +224,12 @@ TOOLS
   ledger_guide           this text
   ledger_search          full-text search over questions (takeaways weighted highest), diffs, exps
   ledger_add_question    open a research line (search first; find-or-create)
-  ledger_add_diff        record a code change (captures the patch), linked to a question
+  ledger_add_diff        record a code change as commit links, linked to a question
   ledger_add_experiment  record a run, linked to a question and diff ids
   ledger_add_asset       attach an artifact (checkpoint, video, plot, wandb) to any entry
-  ledger_update          status/results/conclusion, add_takeaways, add_metrics, job ids, wandb, tags
+  ledger_update          status/results/conclusion, add_takeaways, add_metrics, add_commits, jobs, tags
   ledger_list            browse entries (filter by kind/status/worktree/query)
-  ledger_show            full JSON for one entry (+ patch path for diffs)
+  ledger_show            full JSON for one entry (commit links for diffs)
 """
 
 TOOLS = [
@@ -258,11 +264,13 @@ TOOLS = [
     {
         "name": "ledger_add_diff",
         "description": (
-            "Record a completed code change in the ledger and capture its patch. Call once per coherent "
-            "change (not per file), after the edits are done, and before logging any experiment that "
-            "depends on it. Pass the question_id of the research line it belongs to — real research work is "
-            "expected to be linked to a question. Returns the new diff id to pass to ledger_add_experiment. "
-            "Review status and notes are the user's and cannot be set here."
+            "Record a completed code change as a list of GitHub commit links under a question. Commit your "
+            "work first, then register the shas (or commits='auto' for everything on the branch since main). "
+            "Do NOT capture file lists/patches unless the user asks for an uncommitted snapshot. Call once "
+            "per coherent change (not per file), before logging any experiment that depends on it. Pass the "
+            "question_id of the research line it belongs to — real research work is expected to be linked to "
+            "a question. Returns the new diff id to pass to ledger_add_experiment. Review status and notes "
+            "are the user's and cannot be set here."
         ),
         "inputSchema": {
             "type": "object",
@@ -282,11 +290,23 @@ TOOLS = [
                 },
                 "capture": {
                     "type": "string",
-                    "enum": ["working", "branch"],
-                    "description": "working = uncommitted diff vs HEAD (default); branch = merge-base...HEAD",
+                    "enum": ["none", "working", "branch"],
+                    "description": (
+                        "none = commit links only (default); working = uncommitted diff vs HEAD; "
+                        "branch = merge-base...HEAD. Only on explicit user request."
+                    ),
                 },
                 "tags": {"type": "array", "items": {"type": "string"}},
-                "commits": {"type": "array", "items": {"type": "string"}},
+                "commits": {
+                    "anyOf": [
+                        {"type": "array", "items": {"type": "string"}},
+                        {"type": "string", "enum": ["auto"]},
+                    ],
+                    "description": (
+                        "commit shas/refs in repo_dir, or 'auto' for every commit on the branch since "
+                        "merge-base with main/master"
+                    ),
+                },
             },
             "required": ["title", "summary", "repo_dir"],
             "additionalProperties": False,
@@ -351,8 +371,8 @@ TOOLS = [
             "in results when runs finish -- a stale 'running' is worse than no entry -- and write the "
             "conclusion (and status) of a question once the evidence is in. Also appends takeaways to a "
             "question (the permanent, searchable findings), relinks a diff/experiment to a question, and "
-            "appends job ids, wandb runs, tags and diff links. Diff review status and notes are set by the "
-            "user in the GUI and are rejected here."
+            "appends commit links (add_commits + repo_dir, diffs only), job ids, wandb runs, tags and diff "
+            "links. Diff review status and notes are set by the user in the GUI and are rejected here."
         ),
         "inputSchema": {
             "type": "object",
@@ -403,6 +423,18 @@ TOOLS = [
                         "experiments only: attach 1-3 wandb metrics polled every 5 minutes and plotted on the "
                         "dashboard; appended and deduped on (run_url, key)"
                     ),
+                },
+                "add_commits": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "diffs only: commit shas/refs to append as commit links; needs repo_dir to resolve, "
+                        "deduped on sha"
+                    ),
+                },
+                "repo_dir": {
+                    "type": "string",
+                    "description": "absolute path of the checkout to resolve add_commits in; required with it",
                 },
                 "add_diff_ids": {"type": "array", "items": {"type": "string"}},
                 "add_job_ids": {"type": "array", "items": {"type": "string"}},
@@ -472,8 +504,8 @@ TOOLS = [
     {
         "name": "ledger_show",
         "description": (
-            "Show one ledger entry as full JSON. For diffs it also prints the absolute path of the stored "
-            "patch so you can Read it."
+            "Show one ledger entry as full JSON. For diffs the commit links are printed as "
+            "'<short> <subject> <url>' lines, plus the absolute path of a stored patch if there is one."
         ),
         "inputSchema": {
             "type": "object",
@@ -582,8 +614,8 @@ def tool_add_diff(args: dict) -> str:
     title = as_str(args, "title", required=True)
     summary = as_str(args, "summary", required=True)
     repo_dir = as_str(args, "repo_dir", required=True)
-    capture = as_str(args, "capture", default="working")
-    assert capture in ("working", "branch"), "capture must be 'working' or 'branch'"
+    capture = as_str(args, "capture", default="none")
+    assert capture in ("none", "working", "branch"), "capture must be 'none', 'working' or 'branch'"
     assert os.path.isabs(repo_dir), "repo_dir must be an absolute path"
     assert os.path.isdir(repo_dir), f"repo_dir does not exist: {repo_dir}"
     assert summary.strip(), "summary must not be empty: say what changed and why"
@@ -591,15 +623,29 @@ def tool_add_diff(args: dict) -> str:
     if question_id:
         assert_question_exists(root, question_id)
 
+    raw_commits = args.get("commits")
+    if isinstance(raw_commits, str) and raw_commits.strip().lower() == "auto":
+        refs = commits_since_trunk(repo_dir)
+    else:
+        refs = as_list(args, "commits")
+    assert refs or capture != "none", (
+        "a diff is a list of GitHub commit links: commit your work first, then register the shas with "
+        "commits=[...] (or commits='auto' for everything on the branch since main). Only pass capture= "
+        "when the user asks for an uncommitted snapshot."
+    )
+    commits = resolve_commits(repo_dir, refs)
+
     _, diffs_dir, _, _ = subdirs(root)
     entry_id = unique_id(root, f"{datetime.now().strftime('%Y-%m-%d')}-{slugify(title)}")
 
     repo, worktree, branch = detect_worktree(repo_dir)
-    patch_text, changed = capture_diff(capture, repo_dir)
+    changed: list[str] = []
     patch_rel = None
-    if patch_text.strip():
-        patch_rel = os.path.join("patches", f"{entry_id}.patch")
-        atomic_write(os.path.join(root, patch_rel), patch_text + "\n")
+    if capture != "none":
+        patch_text, changed = capture_diff(capture, repo_dir)
+        if patch_text.strip():
+            patch_rel = os.path.join("patches", f"{entry_id}.patch")
+            atomic_write(os.path.join(root, patch_rel), patch_text + "\n")
 
     ts = now_ts()
     entry = {
@@ -611,7 +657,7 @@ def tool_add_diff(args: dict) -> str:
         "repo": repo,
         "worktree": worktree,
         "branch": branch,
-        "commits": as_list(args, "commits"),
+        "commits": commits,
         "files": changed,
         "patch": patch_rel,
         "status": "unreviewed",
@@ -622,11 +668,11 @@ def tool_add_diff(args: dict) -> str:
         "updated": ts,
     }
     write_entry(os.path.join(diffs_dir, f"{entry_id}.json"), entry)
-    stored = "yes" if patch_rel else "no (empty diff)"
-    return "\n".join(
-        [entry_id, f"recorded in {repo}/{worktree} ({branch}); patch stored: {stored}; {len(changed)} files"]
-        + brevity_warnings(args)
-    )
+    lines = [entry_id, f"recorded in {repo}/{worktree} ({branch}); {len(commits)} commit(s)"]
+    lines += [f"  {format_commit_line(commit)}" for commit in commits]
+    if capture != "none":
+        lines.append(f"patch stored: {'yes' if patch_rel else 'no (empty diff)'}; {len(changed)} files")
+    return "\n".join(lines + brevity_warnings(args))
 
 
 def tool_add_experiment(args: dict) -> str:
@@ -726,6 +772,14 @@ def tool_update(args: dict) -> str:
         assert kind == "experiment", "add_diff_ids applies to experiment entries"
         assert_diffs_exist(root, add_diff_ids)
         append_dedup(entry, "diff_ids", add_diff_ids)
+    add_commit_refs = as_list(args, "add_commits")
+    if add_commit_refs:
+        assert kind == "diff", "add_commits applies to diff entries"
+        repo_dir = as_str(args, "repo_dir", default="") or ""
+        assert repo_dir, "add_commits needs repo_dir: the absolute path of the checkout the commits live in"
+        assert os.path.isabs(repo_dir), "repo_dir must be an absolute path"
+        assert os.path.isdir(repo_dir), f"repo_dir does not exist: {repo_dir}"
+        add_commits(entry, resolve_commits(repo_dir, add_commit_refs))
     add_job_ids = as_list(args, "add_job_ids")
     if add_job_ids:
         assert kind == "experiment", "add_job_ids applies to experiment entries"
@@ -868,7 +922,13 @@ def tool_show(args: dict) -> str:
     path = entry_path(root, entry_id)
     assert path is not None, f"no ledger entry with id {entry_id}"
     entry = load_entry(path)
-    text = json.dumps(entry, indent=2)
+    commits = entry.get("commits") or []
+    if entry.get("kind") == "diff" and commits:
+        rest = {key: value for key, value in entry.items() if key != "commits"}
+        listing = "\n".join(f"  {format_commit_line(commit)}" for commit in commits)
+        text = f"{json.dumps(rest, indent=2)}\ncommits:\n{listing}"
+    else:
+        text = json.dumps(entry, indent=2)
     rel = entry.get("patch")
     if rel:
         patch_path = os.path.join(root, rel)

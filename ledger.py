@@ -96,6 +96,93 @@ def capture_diff(mode: str, cwd: str | None = None) -> tuple[str, list[str]]:
     return patch, [f.strip() for f in files if f.strip()]
 
 
+GITHUB_REMOTE_RES = (
+    re.compile(r"^git@github\.com:(?P<path>.+?)(?:\.git)?/?$"),
+    re.compile(r"^(?:ssh://git@|https://)github\.com/(?P<path>.+?)(?:\.git)?/?$"),
+)
+
+
+def github_base_url(repo_dir: str | None = None) -> str | None:
+    """https://github.com/<owner>/<repo> from the origin remote; None when origin is missing or not github."""
+    code, url = git(["remote", "get-url", "origin"], cwd=repo_dir)
+    if code != 0 or not url:
+        return None
+    for pattern in GITHUB_REMOTE_RES:
+        match = pattern.match(url.strip())
+        if match:
+            return f"https://github.com/{match.group('path').strip('/')}"
+    return None
+
+
+def resolve_commits(repo_dir: str | None, refs: list[str]) -> list[dict]:
+    """Refs -> [{sha, short, subject, url}] (url None off github); every ref must resolve. Deduped, order kept."""
+    base = github_base_url(repo_dir)
+    commits: list[dict] = []
+    seen: set[str] = set()
+    for raw in refs:
+        ref = raw.strip()
+        if not ref:
+            continue
+        code, sha = git(["rev-parse", "--verify", f"{ref}^{{commit}}"], cwd=repo_dir)
+        assert code == 0 and sha, f"could not resolve commit ref {ref!r} in {repo_dir or os.getcwd()}"
+        if sha in seen:
+            continue
+        seen.add(sha)
+        code, subject = git(["show", "-s", "--format=%s", sha], cwd=repo_dir)
+        commits.append(
+            {
+                "sha": sha,
+                "short": sha[:7],
+                "subject": subject if code == 0 else "",
+                "url": f"{base}/commit/{sha}" if base else None,
+            }
+        )
+    return commits
+
+
+def commits_since_trunk(repo_dir: str | None = None, limit: int = 50) -> list[str]:
+    """Shas of merge-base(main|master, HEAD)..HEAD, newest first; empty when there is no merge-base."""
+    base = ""
+    for trunk in ("main", "master"):
+        code, base = git(["merge-base", trunk, "HEAD"], cwd=repo_dir)
+        if code == 0 and base:
+            break
+        base = ""
+    if not base:
+        return []
+    code, out = git(["log", "--format=%H", f"-n{limit}", f"{base}..HEAD"], cwd=repo_dir)
+    if code != 0:
+        return []
+    return [line.strip() for line in out.splitlines() if line.strip()]
+
+
+def add_commits(entry: dict, commits: list[dict]) -> None:
+    """Append commit objects to entry['commits']; dedup on sha, upgrading legacy sha strings in place."""
+    existing = list(entry.get("commits") or [])
+    for commit in commits:
+        sha = commit["sha"]
+        matched = False
+        for i, item in enumerate(existing):
+            if isinstance(item, dict):
+                matched = item.get("sha") == sha
+            elif isinstance(item, str) and item.strip() and sha.startswith(item.strip()):
+                existing[i] = commit  # legacy plain sha -> full object
+                matched = True
+            if matched:
+                break
+        if not matched:
+            existing.append(commit)
+    entry["commits"] = existing
+
+
+def format_commit_line(commit: dict | str) -> str:
+    """'<short>  <subject>  <url>' for a commit object; the raw string for a legacy entry."""
+    if not isinstance(commit, dict):
+        return str(commit)
+    parts = [commit.get("short") or (commit.get("sha") or "")[:7], commit.get("subject") or "", commit.get("url") or ""]
+    return "  ".join(part for part in parts if part)
+
+
 def entry_path(root: str, entry_id: str) -> str | None:
     for d in subdirs(root)[:3]:
         path = os.path.join(d, f"{entry_id}.json")
@@ -173,6 +260,15 @@ def cmd_add_diff(args: argparse.Namespace) -> None:
     if args.question:
         assert_question_exists(root, args.question)
 
+    refs = split_list(args.commits)
+    if args.commits_since_main:
+        refs += commits_since_trunk()
+    assert refs or args.capture, (
+        "a diff is a list of commit links: commit your work first, then register the shas with "
+        "--commits <a,b> (or --commits-since-main). --capture is only for an uncommitted snapshot."
+    )
+    commits = resolve_commits(None, refs)
+
     entry_id = args.id or f"{datetime.now().strftime('%Y-%m-%d')}-{slugify(args.title)}"
     entry_id = unique_id(root, entry_id)
 
@@ -199,7 +295,7 @@ def cmd_add_diff(args: argparse.Namespace) -> None:
         "repo": repo,
         "worktree": worktree,
         "branch": branch,
-        "commits": split_list(args.commits),
+        "commits": commits,
         "files": files,
         "patch": patch_rel,
         "status": args.status,
@@ -338,6 +434,9 @@ def cmd_update(args: argparse.Namespace) -> None:
         for diff_id in new_ids:
             assert os.path.exists(os.path.join(diffs_dir, f"{diff_id}.json")), f"unknown diff id: {diff_id}"
         append_dedup(entry, "diff_ids", new_ids)
+    if args.add_commits:
+        assert kind == "diff", "--add-commits applies to diff entries"
+        add_commits(entry, resolve_commits(None, split_list(args.add_commits)))
     if args.add_jobs:
         assert kind == "experiment", "--add-jobs applies to experiment entries"
         append_dedup(entry, "job_ids", split_list(args.add_jobs))
@@ -481,7 +580,7 @@ def field_text(entry: dict, key: str) -> str:
         lines = []
         for item in value:
             if isinstance(item, dict):
-                lines.append(" ".join(str(v) for v in item.values()))
+                lines.append(" ".join(str(v) for v in item.values() if v is not None))
             else:
                 lines.append(str(item))
         return "\n".join(lines)
@@ -567,9 +666,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--status", default="unreviewed")
     p.add_argument("--question", help="research question id this change belongs to")
     p.add_argument("--tags")
-    p.add_argument("--commits")
+    p.add_argument("--commits", help="comma-separated commit refs (shas/HEAD/...), resolved in the cwd repo")
+    p.add_argument(
+        "--commits-since-main",
+        action="store_true",
+        help="register every commit on this branch since merge-base with main/master",
+    )
     p.add_argument("--files", help="comma-separated file list, used when --capture is absent")
-    p.add_argument("--capture", choices=["working", "branch"])
+    p.add_argument("--capture", choices=["working", "branch"], help="optional: store an uncommitted/branch patch")
     p.add_argument("--no-files", action="store_true", help="do not fill files[] from the capture")
     p.set_defaults(func=cmd_add_diff)
 
@@ -602,6 +706,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--conclusion", help="questions only: the evolving answer")
     p.add_argument("--question", help="diff/experiment only: question id, empty string clears the link")
     p.add_argument("--add-diffs")
+    p.add_argument("--add-commits", help="diffs only: comma-separated commit refs, resolved in the cwd repo")
     p.add_argument("--add-jobs")
     p.add_argument("--add-wandb")
     p.add_argument(
