@@ -182,12 +182,24 @@
     text-align: left;
     background: none;
     border: none;
-    border-left: 2px solid transparent;
-    padding: 7px 14px 8px 13px;
+    border-left: 3px solid transparent;
+    padding: 7px 14px 8px 12px;
   }
   .navitem:hover { background: var(--paper-hover); }
-  .navitem.on { background: var(--paper-hover); border-left-color: var(--gold); }
+  .navitem.on { background: var(--paper-hover); }
+  .navitem.on .navtitle { font-weight: 600; }
   .navitem.muted .navtitle { color: var(--muted); }
+  .wtchip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--muted);
+    white-space: nowrap;
+  }
+  .wtchip .sw { width: 8px; height: 8px; border-radius: 2px; flex: none; }
+  .navcount .wtchip { margin-right: 6px; }
   .navhead { display: flex; align-items: flex-start; gap: 7px; }
   .navhead .dot { margin-top: 6px; }
   .navglyph { flex: none; width: 6px; font-size: 11px; line-height: 1.35; color: var(--muted); }
@@ -1565,6 +1577,8 @@ function questionSection(question, diffs, exps) {
   main.appendChild(el("h2", "qtitle", question.title || "untitled question"));
   const line = el("div", "qline");
   line.appendChild(statusTag(question, true));
+  const wt = worktreeOfQuestion(question.id);
+  if (wt) line.appendChild(wtChip(wt));
   line.appendChild(el("span", "qid", "updated " + fmtStamp(question.updated)));
   for (const t of question.tags || []) line.appendChild(el("span", "tag", "#" + t));
   main.appendChild(line);
@@ -1674,14 +1688,52 @@ async function openPatch(entry) {
 
 // ---- left pane: question navigation -------------------------------------------
 
+// ---- worktree color coding ----------------------------------------------------
+// muted hues that sit on the paper and stay clear of the status colors; assigned by name hash so a
+// worktree keeps its color across sessions; the chip always carries the name (never color alone)
+const WT_PALETTE = ["#2F6F7E", "#6B4C8A", "#3D5A99", "#B4632B", "#6B7A2B", "#9A3F6E", "#7A5230", "#4F6D7A"];
+
+function wtColor(name) {
+  let h = 0;
+  for (const ch of String(name)) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return WT_PALETTE[h % WT_PALETTE.length];
+}
+
+function worktreeOfQuestion(qid) {
+  const counts = new Map();
+  for (const d of state.diffs) {
+    if (qidOf(d) !== qid || !d.worktree) continue;
+    counts.set(d.worktree, (counts.get(d.worktree) || 0) + 1);
+  }
+  let best = null;
+  for (const [name, n] of counts) if (!best || n > best[1]) best = [name, n];
+  return best ? best[0] : null;
+}
+
+function wtChip(name) {
+  const chip = el("span", "wtchip");
+  const sw = el("span", "sw");
+  sw.style.background = wtColor(name);
+  chip.appendChild(sw);
+  chip.appendChild(el("span", null, name));
+  chip.title = "worktree " + name;
+  return chip;
+}
+
 function navItem(key, opts) {
   const item = el("button", "navitem" + (state.selected === key ? " on" : "") + (opts.muted ? " muted" : ""));
+  if (opts.worktree) item.style.borderLeftColor = wtColor(opts.worktree);
   const head = el("div", "navhead");
   if (opts.glyph) head.appendChild(el("span", "navglyph", opts.glyph));
   else head.appendChild(el("span", "dot " + opts.dotClass));
   head.appendChild(el("div", "navtitle", opts.title));
   item.appendChild(head);
-  if (opts.count) item.appendChild(el("div", "navcount", opts.count));
+  if (opts.count || opts.worktree) {
+    const count = el("div", "navcount");
+    if (opts.worktree) count.appendChild(wtChip(opts.worktree));
+    if (opts.count) count.appendChild(el("span", null, opts.count));
+    item.appendChild(count);
+  }
   item.onclick = () => setSelected(key);
   return item;
 }
@@ -1710,6 +1762,7 @@ function renderNav() {
         dotClass: statusClass(question),
         title: question.title || "untitled question",
         count: bits.join(" · "),
+        worktree: worktreeOfQuestion(question.id),
       })
     );
     shown++;
