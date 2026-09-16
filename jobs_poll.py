@@ -23,7 +23,7 @@ CLUSTERS = {
     "delta": {"host": "delta", "user": "bao3", "logs": "/work/nvme/bipn/bao3/slurm_logs"},
 }
 SSH_OPTS = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]
-SQUEUE_FMT = "%i|%P|%T|%M|%l|%D|%N|%R|%b"
+SQUEUE_FMT = "%i|%P|%T|%M|%l|%D|%N|%R|%b|%j"
 LOCAL_PATTERN = re.compile(r"train\.py|play\.py|collect_.*\.py|probes/")
 STALL_S = 900
 NO_ITER_S = 20 * 60
@@ -145,7 +145,9 @@ def collect_slurm(name: str) -> dict:
             reason="" if parts[2] == "RUNNING" or parts[7] in ("None", "") else parts[7].strip("()"),
             gpus=parts[8].replace("gres/gpu:", "").replace("gres/gpu", ""),
         )
-        job["name"] = f"job {parts[0]}"
+        # SLURM job name (the submit scripts set it to --run_name; older jobs carry a timestamp name)
+        slurm_name = parts[9] if len(parts) > 9 else ""
+        job["name"] = slurm_name if slurm_name and not re.match(r"^(uwlab-dist|dist-training)-\d", slurm_name) else f"job {parts[0]}"
         jobs[parts[0]] = job
 
     if jobs:
