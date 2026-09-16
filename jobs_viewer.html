@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>live jobs</title>
+<style>
+  :root {
+    --bg: #05060a; --panel: #0a0c14; --rule: #14182a;
+    --cyan: #00f0ff; --mag: #ff2bd6; --amber: #ffb000; --dim: #5c6480; --ink: #c9d1e6;
+    --mono: "JetBrains Mono", "Fira Code", "SF Mono", Menlo, Consolas, "DejaVu Sans Mono", monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--ink); font: 13px/1.45 var(--mono); }
+  body::after {
+    content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 9;
+    background: repeating-linear-gradient(0deg, rgba(0,0,0,0) 0 2px, rgba(0,240,255,0.025) 2px 3px);
+  }
+  a { color: var(--cyan); }
+  .wrap { max-width: 1400px; margin: 0 auto; padding: 18px 20px 60px; }
+
+  header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding-bottom: 10px;
+    border-bottom: 1px solid var(--cyan); box-shadow: 0 1px 12px rgba(0,240,255,0.35); margin-bottom: 22px; }
+  header h1 { margin: 0; font-size: 14px; font-weight: 500; letter-spacing: 0.08em; color: var(--cyan);
+    text-shadow: 0 0 8px rgba(0,240,255,0.7); }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--cyan); box-shadow: 0 0 10px var(--cyan);
+    animation: pulse 1.6s ease-in-out infinite; }
+  .dot.stale { background: var(--amber); box-shadow: 0 0 10px var(--amber); animation: none; }
+  @keyframes pulse { 0%,100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.35; transform: scale(0.7); } }
+  .age { color: var(--dim); font-size: 12px; }
+  .spacer { flex: 1; }
+  .count { color: var(--dim); font-size: 12px; }
+  .count b { color: var(--mag); font-weight: 500; }
+  .count a { color: var(--dim); text-decoration: none; margin-left: 10px; }
+  .count a:hover { color: var(--cyan); }
+
+  section { margin-bottom: 24px; }
+  h2 { margin: 0 0 6px; font-size: 12px; font-weight: 500; letter-spacing: 0.14em; text-transform: uppercase;
+    color: var(--mag); text-shadow: 0 0 6px rgba(255,43,214,0.5); display: flex; gap: 10px; align-items: baseline; }
+  h2 .meta { color: var(--dim); text-transform: none; letter-spacing: 0; font-weight: 400; }
+  .scroll { overflow-x: auto; border: 1px solid var(--rule); background: var(--panel); }
+  table { border-collapse: collapse; width: 100%; min-width: 900px; }
+  th, td { padding: 6px 10px; text-align: left; white-space: nowrap; border-bottom: 1px solid var(--rule);
+    vertical-align: middle; }
+  th { color: var(--dim); font-weight: 400; font-size: 11px; letter-spacing: 0.1em; }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: rgba(0,240,255,0.04); }
+  td.name { max-width: 360px; overflow: hidden; text-overflow: ellipsis; cursor: default; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .empty, .offline { padding: 7px 10px; color: var(--dim); border: 1px dashed var(--rule); font-size: 12px; }
+  .offline { color: var(--amber); border-color: rgba(255,176,0,0.4); }
+  .st-RUNNING { color: var(--cyan); }
+  .st-PENDING { color: var(--amber); }
+  .st-COMPLETING { color: var(--mag); }
+  .bar { display: inline-block; width: 80px; height: 3px; background: var(--rule); vertical-align: middle;
+    margin-left: 8px; }
+  .bar i { display: block; height: 100%; background: var(--cyan); box-shadow: 0 0 6px var(--cyan); }
+  .badge { font-size: 11px; padding: 1px 6px; border: 1px solid var(--rule); color: var(--dim); }
+  .badge.ok { color: var(--cyan); border-color: rgba(0,240,255,0.35); }
+  .badge.warn { color: var(--amber); border-color: rgba(255,176,0,0.5); }
+  .badge.bad { color: var(--mag); border-color: var(--mag); text-shadow: 0 0 6px var(--mag);
+    box-shadow: 0 0 8px rgba(255,43,214,0.4); }
+  .gpus { color: var(--dim); font-size: 12px; margin-top: 6px; }
+  .gpus b { color: var(--ink); font-weight: 400; }
+  .err { color: var(--mag); padding: 10px; border: 1px solid var(--mag); margin-bottom: 16px; }
+  @media (max-width: 700px) { .wrap { padding: 12px 10px 40px; } td.name { max-width: 200px; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="dot" id="dot"></div>
+    <h1>// LIVE JOBS &mdash; tillicum &middot; hyak &middot; delta &middot; local</h1>
+    <span class="age" id="age">connecting&hellip;</span>
+    <span class="spacer"></span>
+    <span class="count" id="count">refresh in <b id="cd">30</b>s <a href="/" title="ledger">&larr; ledger</a></span>
+  </header>
+  <div id="err" class="err" hidden></div>
+  <div id="clusters"></div>
+</div>
+<script>
+"use strict";
+const ORDER = ["tillicum", "hyak", "delta", "local"];
+const REFRESH_S = 30;
+const COLS = ["JOB", "NAME", "STATE", "ELAPSED / LIMIT", "NODE", "ITER", "SUCCESS", "LOG AGE", "BADGE"];
+let countdown = REFRESH_S;
+let generated = null;
+
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
+function fmtAge(s) {
+  if (s === null || s === undefined) return "—";
+  if (s < 60) return s + "s";
+  if (s < 3600) return Math.floor(s / 60) + "m";
+  if (s < 86400) return (s / 3600).toFixed(1) + "h";
+  return (s / 86400).toFixed(1) + "d";
+}
+function badgeClass(b) {
+  if (b === "OK") return "ok";
+  if (b === "STALLED" || b === "NO-ITER") return "bad";
+  return "warn";
+}
+
+function row(j) {
+  const tr = el("tr");
+  tr.appendChild(el("td", "", j.job_id));
+  const name = el("td", "name", j.name || "—");
+  name.title = [j.task, j.log_path].filter(Boolean).join("\n");
+  tr.appendChild(name);
+  const st = el("td", "st-" + j.state, j.state);
+  if (j.partition) st.title = j.partition + (j.gpus ? "  gpu " + j.gpus : "");
+  tr.appendChild(st);
+  tr.appendChild(el("td", "", (j.elapsed || "0:00") + (j.time_limit ? " / " + j.time_limit : "")));
+  tr.appendChild(el("td", "", j.node_list || (j.cluster === "local" ? j.partition : "—")));
+  const it = el("td", "num");
+  if (j.iteration !== null && j.iteration !== undefined) {
+    it.appendChild(document.createTextNode(j.iteration + (j.max_iterations ? "/" + j.max_iterations : "")));
+    if (j.max_iterations) {
+      const bar = el("span", "bar");
+      const fill = el("i");
+      fill.style.width = Math.min(100, 100 * j.iteration / j.max_iterations).toFixed(1) + "%";
+      bar.appendChild(fill);
+      it.appendChild(bar);
+    }
+  } else it.textContent = "—";
+  tr.appendChild(it);
+  tr.appendChild(el("td", "num", j.success === null || j.success === undefined ? "—" : j.success.toFixed(3)));
+  const age = el("td", "num", fmtAge(j.log_age_s));
+  if (j.log_age_s > 900) age.style.color = "var(--amber)";
+  tr.appendChild(age);
+  const bd = el("td");
+  bd.appendChild(el("span", "badge " + badgeClass(j.badge), j.badge));
+  tr.appendChild(bd);
+  return tr;
+}
+
+function section(name, c) {
+  const sec = el("section");
+  const h = el("h2", "", name);
+  if (c) h.appendChild(el("span", "meta", c.ok ? c.jobs.length + " job" + (c.jobs.length === 1 ? "" : "s") : "offline"));
+  sec.appendChild(h);
+  if (!c) { sec.appendChild(el("div", "empty", "no data")); return sec; }
+  if (!c.ok) { sec.appendChild(el("div", "offline", "OFFLINE: " + (c.error || "unknown"))); return sec; }
+  if (c.error) sec.appendChild(el("div", "offline", "warn: " + c.error));
+  if (!c.jobs.length) sec.appendChild(el("div", "empty", "no jobs"));
+  else {
+    const scroll = el("div", "scroll");
+    const table = el("table");
+    const thead = el("thead"), hr = el("tr");
+    for (const col of COLS) hr.appendChild(el("th", "", col));
+    thead.appendChild(hr); table.appendChild(thead);
+    const tbody = el("tbody");
+    for (const j of c.jobs) tbody.appendChild(row(j));
+    table.appendChild(tbody); scroll.appendChild(table); sec.appendChild(scroll);
+  }
+  if (c.gpus && c.gpus.length) {
+    const g = el("div", "gpus");
+    g.innerHTML = c.gpus.map((x) => "gpu" + x.index + " <b>" + x.util + "</b> " + x.mem_used + "/" + x.mem_total).join(" &nbsp;&middot;&nbsp; ");
+    sec.appendChild(g);
+  }
+  return sec;
+}
+
+function render(data) {
+  const root = document.getElementById("clusters");
+  root.textContent = "";
+  const clusters = data.clusters || {};
+  const names = ORDER.filter((n) => n in clusters).concat(Object.keys(clusters).filter((n) => !ORDER.includes(n)));
+  let running = 0, pending = 0;
+  for (const n of names) {
+    root.appendChild(section(n, clusters[n]));
+    for (const j of clusters[n].jobs || []) { if (j.state === "RUNNING") running++; else pending++; }
+  }
+  document.getElementById("count").firstChild.textContent = running + " running · " + pending + " queued · refresh in ";
+  const err = document.getElementById("err");
+  err.hidden = !data.error; err.textContent = data.error || "";
+  generated = data.generated ? new Date(data.generated) : null;
+  if (data.pending) document.getElementById("age").textContent = "first poll in progress…";
+  tickAge();
+}
+
+function tickAge() {
+  const age = document.getElementById("age"), dot = document.getElementById("dot");
+  if (!generated) return;
+  const s = Math.max(0, Math.round((Date.now() - generated) / 1000));
+  age.textContent = "snapshot " + fmtAge(s) + " ago";
+  dot.classList.toggle("stale", s > 300);
+}
+
+async function refresh() {
+  countdown = REFRESH_S;
+  try {
+    const r = await fetch("/api/jobs", { cache: "no-store" });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || r.status);
+    render(data);
+  } catch (e) {
+    document.getElementById("age").textContent = "fetch failed: " + e.message;
+    document.getElementById("dot").classList.add("stale");
+  }
+}
+
+setInterval(() => {
+  countdown -= 1;
+  document.getElementById("cd").textContent = countdown;
+  tickAge();
+  if (countdown <= 0) refresh();
+}, 1000);
+document.addEventListener("keydown", (e) => {
+  if (e.key === "r" || e.key === "R") { if (!e.metaKey && !e.ctrlKey) refresh(); }
+});
+refresh();
+</script>
+</body>
+</html>

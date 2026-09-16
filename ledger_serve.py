@@ -6,15 +6,19 @@ import argparse
 import json
 import os
 import sys
+import threading
+import time
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import unquote, urlparse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from jobs_poll import collect as collect_jobs, write_snapshot  # noqa: E402
 from ledger import atomic_write, ledger_root, metrics_dir, now_ts, statuses_for, subdirs  # noqa: E402
 
 VIEWER_HTML = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ledger_viewer.html")
+JOBS_HTML = os.path.join(os.path.dirname(os.path.abspath(__file__)), "jobs_viewer.html")
 EDITABLE_FIELDS = ("status", "notes", "results", "conclusion", "summary", "title", "takeaways", "text", "why")
 LIST_FIELDS = ("takeaways",)  # edited as one-per-line text in the GUI, posted as a list
 
@@ -47,8 +51,38 @@ def find_entry(root: str, entry_id: str) -> tuple[str, dict] | tuple[None, None]
     return None, None
 
 
+class JobsPoller:
+    """Refreshes the live-jobs snapshot in a daemon thread so /api/jobs never waits on ssh."""
+
+    def __init__(self, root: str, interval: int) -> None:
+        self.root, self.interval = root, interval
+        self.snapshot: dict = {"generated": None, "clusters": {}, "pending": True}
+        self._lock = threading.Lock()
+
+    def start(self) -> None:
+        threading.Thread(target=self._run, name="jobs-poller", daemon=True).start()
+
+    def get(self) -> dict:
+        with self._lock:
+            return self.snapshot
+
+    def _run(self) -> None:
+        while True:
+            t0 = time.time()
+            try:
+                snap = collect_jobs()
+                write_snapshot(snap, self.root)
+            except Exception as exc:  # noqa: BLE001 -- keep polling no matter what
+                print(f"jobs poll failed: {exc}", flush=True)
+                snap = {"generated": now_ts(), "clusters": {}, "error": str(exc)}
+            with self._lock:
+                self.snapshot = snap
+            time.sleep(max(1.0, self.interval - (time.time() - t0)))
+
+
 class Handler(BaseHTTPRequestHandler):
     root = ledger_root()
+    jobs: JobsPoller | None = None
 
     def log_message(self, fmt: str, *args) -> None:
         print(f"{self.log_date_time_string()} {self.address_string()} {fmt % args}", flush=True)
@@ -65,16 +99,30 @@ class Handler(BaseHTTPRequestHandler):
     def _send_json(self, code: int, payload: dict) -> None:
         self._send(code, json.dumps(payload).encode(), "application/json; charset=utf-8", no_store=True)
 
+    def _send_html(self, html_path: str) -> None:
+        try:
+            with open(html_path, "rb") as f:
+                body = f.read()
+        except OSError as exc:
+            self._send_json(500, {"error": f"cannot read {os.path.basename(html_path)}: {exc}"})
+            return
+        self._send(200, body, "text/html; charset=utf-8", no_store=True)
+
     def do_GET(self) -> None:  # noqa: N802
         path = urlparse(self.path).path
         if path in ("/", "/index.html"):
-            try:
-                with open(VIEWER_HTML, "rb") as f:
-                    body = f.read()
-            except OSError as exc:
-                self._send_json(500, {"error": f"cannot read viewer html: {exc}"})
+            self._send_html(VIEWER_HTML)
+            return
+
+        if path == "/jobs":
+            self._send_html(JOBS_HTML)
+            return
+
+        if path == "/api/jobs":
+            if self.jobs is None:
+                self._send_json(503, {"error": "jobs polling disabled (--no-jobs)", "clusters": {}})
                 return
-            self._send(200, body, "text/html; charset=utf-8", no_store=True)
+            self._send_json(200, self.jobs.get())
             return
 
         if path == "/api/data":
@@ -169,11 +217,16 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8777)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--root", default=None)
+    parser.add_argument("--jobs-interval", type=int, default=60, help="seconds between cluster job polls")
+    parser.add_argument("--no-jobs", action="store_true", help="do not poll clusters for /jobs")
     args = parser.parse_args()
 
     root = args.root or ledger_root()
     assert os.path.isdir(root), f"ledger root does not exist: {root} (run ledger.py add-diff first)"
     Handler.root = root
+    if not args.no_jobs:
+        Handler.jobs = JobsPoller(root, args.jobs_interval)
+        Handler.jobs.start()
 
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"ledger root: {root}")

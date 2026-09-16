@@ -104,7 +104,10 @@
     line-height: 1.15;
     letter-spacing: -0.01em;
     white-space: nowrap;
+    display: flex; justify-content: space-between; align-items: baseline;
   }
+  .wordmark a.jobslink { font-family: var(--sans); font-size: 12px; color: var(--muted); text-decoration: none; }
+  .wordmark a.jobslink:hover { color: var(--ink); text-decoration: underline; }
   .search {
     display: block;
     width: 100%;
@@ -584,7 +587,7 @@
 <div class="app">
   <aside class="side">
     <div class="sidehead">
-      <div class="wordmark">Research Dashboard</div>
+      <div class="wordmark">Research Dashboard <a class="jobslink" href="/jobs" title="live cluster queue">jobs →</a></div>
       <input id="search" class="search" type="search" placeholder="search questions, diffs, runs, truths…   ( / )" />
       <div class="filters" id="filters"></div>
       <div class="siderow">
