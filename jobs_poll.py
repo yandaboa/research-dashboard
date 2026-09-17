@@ -183,6 +183,234 @@ def collect_died(name: str) -> list[dict]:
     return sorted(died, key=lambda j: j.get("end", ""), reverse=True)
 
 
+# ---------------------------------------------------------------- cluster capacity / quotas
+_CAP_PARTITIONS = {
+    "tillicum": re.compile(r"^gpu-h200$"),
+    "hyak": re.compile(r"^(gpu-(a40|a100|l40|l40s|h200)|ckpt|ckpt-all)$"),
+    "delta": re.compile(r"^(ghx4|ghx4-interactive)$"),
+}
+# explicit list for `squeue -p` (the regex above is the authority for what we keep)
+_CAP_QUEUE_PARTS = {
+    "tillicum": "gpu-h200",
+    "hyak": "gpu-a40,gpu-a100,gpu-l40,gpu-l40s,gpu-h200,ckpt,ckpt-all",
+    "delta": "ghx4,ghx4-interactive",
+}
+_CAP_GPU_TYPES = {"hyak": re.compile(r"^(a40|a100|l40|l40s|h200)$")}  # ckpt lists every node type
+_GRES_RE = re.compile(r"gpu:(?:([A-Za-z0-9_.]+):)?(\d+)")
+_TRES_GPU_RE = re.compile(r"gres/gpu=(\d+)")
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+_HEALTHY_STATES = ("alloc", "mix", "idle", "comp")
+_GPU_TYPE_ALIAS = {"nvidia_gh200_120gb": "gh200"}
+
+
+def _capacity_script(name: str) -> str:
+    parts = [
+        'echo "== gres"',
+        'sinfo -h -N -O "NodeList:30,Partition:30,StateCompact:20,Gres:60,GresUsed:80" 2>/dev/null',
+        'echo "== queue"',
+        f'squeue -h -p {_CAP_QUEUE_PARTS[name]} -O "UserName:30,StateCompact:10,Partition:40,tres-alloc:120" 2>/dev/null',
+        'echo "== quota"',
+    ]
+    if name == "hyak":
+        parts.append("hyakalloc 2>/dev/null")
+    elif name == "tillicum":
+        parts += ["hyakusage -p 2>/dev/null", 'echo "== usage"', "hyakusage 2>/dev/null"]
+    elif name == "delta":
+        parts.append("accounts 2>/dev/null")
+    return "; ".join(parts)
+
+
+def _sections(out: str) -> dict[str, list[str]]:
+    sections: dict[str, list[str]] = {}
+    cur = "pre"
+    for line in out.splitlines():
+        m = re.match(r"^== (\w+)$", line.strip())
+        if m:
+            cur = m.group(1)
+            sections[cur] = []
+            continue
+        sections.setdefault(cur, []).append(line)
+    return sections
+
+
+def _gres_gpus(field: str) -> tuple[str, int] | None:
+    m = _GRES_RE.search(field)
+    if not m:
+        return None
+    gtype = m.group(1) or "gpu"
+    return _GPU_TYPE_ALIAS.get(gtype, gtype), int(m.group(2))
+
+
+def _parse_gres(lines: list[str], name: str) -> list[dict]:
+    keep = _CAP_PARTITIONS[name]
+    types = _CAP_GPU_TYPES.get(name)
+    agg: dict[tuple[str, str], dict] = {}
+    for line in lines:
+        cols = line.split()
+        if len(cols) < 5:
+            continue
+        partition = cols[1].rstrip("*")
+        if not keep.match(partition):
+            continue
+        gres, used_field = _gres_gpus(cols[3]), _gres_gpus(cols[4])
+        if gres is None:
+            continue
+        gtype, total = gres
+        if types and not types.match(gtype):
+            continue
+        used = used_field[1] if used_field else 0
+        state = cols[2].rstrip("*-+")
+        row = agg.setdefault(
+            (partition, gtype),
+            {"partition": partition, "type": gtype, "total": 0, "used": 0, "free": 0, "down": 0,
+             "nodes": 0, "nodes_down": 0},
+        )
+        row["nodes"] += 1
+        if state.startswith(_HEALTHY_STATES):
+            row["total"] += total
+            row["used"] += used
+        else:
+            row["down"] += total
+            row["nodes_down"] += 1
+    for row in agg.values():
+        row["free"] = row["total"] - row["used"]
+    return sorted(agg.values(), key=lambda r: (r["partition"], r["type"]))
+
+
+def _parse_queue(lines: list[str], name: str) -> list[dict]:
+    keep = _CAP_PARTITIONS[name]
+    me = CLUSTERS[name]["user"]
+    agg: dict[str, dict] = {}
+    for line in lines:
+        cols = line.split()
+        if len(cols) < 3:
+            continue
+        user, state, partitions = cols[0], cols[1], cols[2]
+        partition = next((p.rstrip("*") for p in partitions.split(",") if keep.match(p.rstrip("*"))), None)
+        if partition is None:
+            continue
+        tres = cols[3] if len(cols) > 3 else ""
+        m = _TRES_GPU_RE.search(tres)
+        gpus = int(m.group(1)) if m else 0
+        row = agg.setdefault(
+            partition,
+            {"partition": partition, "running_jobs": 0, "running_gpus": 0, "pending_jobs": 0,
+             "pending_gpus": 0, "pending_others_jobs": 0, "pending_others_gpus": 0},
+        )
+        if state == "R":
+            row["running_jobs"] += 1
+            row["running_gpus"] += gpus
+        elif state == "PD":
+            row["pending_jobs"] += 1
+            row["pending_gpus"] += gpus
+            if user != me:
+                row["pending_others_jobs"] += 1
+                row["pending_others_gpus"] += gpus
+    return sorted(agg.values(), key=lambda r: r["partition"])
+
+
+def _parse_hyakalloc(lines: list[str]) -> list[dict]:
+    """hyakalloc's box table: account+partition appear only on the TOTAL row of each block."""
+    rows: dict[tuple[str, str], dict] = {}
+    account = partition = ""
+    for line in lines:
+        if not re.search(r"[│|]", line):
+            continue
+        cells = [c.strip() for c in re.split(r"[│|]", _ANSI_RE.sub("", line))]
+        cells = [c for c in cells if c != ""] or []
+        if len(cells) < 4:
+            continue
+        kind = cells[-1]
+        if kind not in ("TOTAL", "USED", "FREE"):
+            continue
+        nums = cells[-4:-1]  # CPUS, MEMORY, GPUS
+        try:
+            gpus = int(nums[2])
+        except ValueError:
+            continue
+        if kind == "TOTAL":
+            if len(cells) < 6:
+                continue
+            account, partition = cells[0], cells[1]
+            rows[(account, partition)] = {"account": account, "partition": partition,
+                                          "total": gpus, "used": 0, "free": 0}
+        elif (account, partition) in rows:
+            rows[(account, partition)]["used" if kind == "USED" else "free"] = gpus
+    return sorted((r for r in rows.values() if r["total"] > 0), key=lambda r: -r["free"])
+
+
+def _parse_tillicum_quota(csv_lines: list[str], usage_lines: list[str], user: str) -> dict | None:
+    quota = None
+    for line in csv_lines:
+        cols = _ANSI_RE.sub("", line).strip().split(",")
+        if len(cols) < 8 or cols[0] in ("account", ""):
+            continue
+        try:
+            total, used = float(cols[5]), float(cols[6])
+        except ValueError:
+            continue
+        quota = {
+            "unit": "USD",
+            "used": used,
+            "total": total,
+            "period": f"{cols[2]} → {cols[3]}",
+            "label": f"{cols[0]} {cols[4]} budget",
+            "gpu_hours": None,
+            "mine": None,
+            "mine_label": user,
+        }
+        break
+    if quota is None:
+        return None
+    for line in usage_lines:
+        clean = _ANSI_RE.sub("", line)
+        m = re.search(r"TOTAL Usage:\s*([\d.]+)\s*GPU hours", clean)
+        if m:
+            quota["gpu_hours"] = float(m.group(1))
+        if user in clean and quota["mine"] is None:
+            m = re.search(r"\$([\d.]+)", clean)
+            if m:
+                quota["mine"] = float(m.group(1))
+    return quota
+
+
+def _parse_delta_quota(lines: list[str]) -> dict | None:
+    for line in lines:
+        cols = _ANSI_RE.sub("", line).split()
+        if len(cols) < 3 or not cols[1].isdigit() or not cols[2].isdigit():
+            continue
+        balance, deposited = int(cols[1]), int(cols[2])
+        return {
+            "unit": "GPU h",
+            "used": deposited - balance,
+            "total": deposited,
+            "period": None,
+            "label": f"{cols[0]} allocation",
+        }
+    return None
+
+
+def collect_capacity(name: str) -> dict:
+    """Per-partition GPU availability, queue pressure and the account quota for one cluster."""
+    cfg = CLUSTERS[name]
+    result = {"ok": True, "error": None, "gpus": [], "queue": [], "accounts": [], "quota": None}
+    try:
+        out = _ssh(cfg["host"], _capacity_script(name), timeout=60)
+        sec = _sections(out)
+        result["gpus"] = _parse_gres(sec.get("gres", []), name)
+        result["queue"] = _parse_queue(sec.get("queue", []), name)
+        if name == "hyak":
+            result["accounts"] = _parse_hyakalloc(sec.get("quota", []))
+        elif name == "tillicum":
+            result["quota"] = _parse_tillicum_quota(sec.get("quota", []), sec.get("usage", []), cfg["user"])
+        elif name == "delta":
+            result["quota"] = _parse_delta_quota(sec.get("quota", []))
+    except Exception as exc:  # noqa: BLE001 -- capacity is decoration; never fail the jobs list
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}", "gpus": [], "queue": [],
+                "accounts": [], "quota": None}
+    return result
+
+
 def collect_slurm(name: str) -> dict:
     cfg = CLUSTERS[name]
     result = {"ok": True, "error": None, "jobs": []}
@@ -302,15 +530,21 @@ def collect_local() -> dict:
 
 def collect() -> dict:
     names = list(CLUSTERS)
-    with ThreadPoolExecutor(max_workers=len(names) + 1) as pool:
+    with ThreadPoolExecutor(max_workers=2 * len(names) + 1) as pool:
         futures = {n: pool.submit(collect_slurm, n) for n in names}
         futures["local"] = pool.submit(collect_local)
+        caps = {n: pool.submit(collect_capacity, n) for n in names}
         clusters = {}
         for n, fut in futures.items():
             try:
                 clusters[n] = fut.result()
             except Exception as exc:  # noqa: BLE001 -- a collector bug must not take the dashboard down
                 clusters[n] = {"ok": False, "error": f"{type(exc).__name__}: {exc}", "jobs": []}
+        for n, fut in caps.items():
+            try:
+                clusters[n]["capacity"] = fut.result()
+            except Exception as exc:  # noqa: BLE001
+                clusters[n]["capacity"] = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
     return {"generated": datetime.now().isoformat(timespec="seconds"), "clusters": clusters}
 
 

@@ -69,6 +69,30 @@
   .died .r .dim { color: var(--dim); }
   .gpus { color: var(--dim); font-size: 12px; margin-top: 6px; }
   .gpus b { color: var(--ink); font-weight: 400; }
+  details.cap { margin-top: 26px; border-top: 1px solid var(--rule); padding-top: 10px; }
+  details.cap > summary { cursor: pointer; list-style: none; font-size: 12px; letter-spacing: 0.14em;
+    text-transform: uppercase; color: var(--mag); text-shadow: 0 0 6px rgba(255,43,214,0.5); }
+  details.cap > summary::-webkit-details-marker { display: none; }
+  details.cap > summary::before { content: "[+] "; }
+  details.cap[open] > summary::before { content: "[-] "; }
+  .cap .cap-note { color: var(--dim); font-size: 11px; margin: 6px 0 2px; }
+  .cap .digest { color: var(--dim); text-transform: none; letter-spacing: 0; margin-left: 10px; }
+  .cap .body { margin-top: 12px; }
+  .cap .cb { margin-bottom: 18px; }
+  .cap .h3 { font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--cyan);
+    text-shadow: 0 0 6px rgba(0,240,255,0.5); margin-bottom: 5px; }
+  .cap table { min-width: 700px; }
+  .cap .quota { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; margin-bottom: 7px;
+    font-size: 12px; }
+  .cap .quota .lbl { color: var(--dim); }
+  .qbar { display: inline-block; width: 200px; height: 6px; background: var(--rule); vertical-align: middle; }
+  .qbar i { display: block; height: 100%; background: var(--cyan); box-shadow: 0 0 6px var(--cyan); }
+  .qbar.warn i { background: var(--amber); box-shadow: 0 0 6px var(--amber); }
+  .qbar.hot i { background: var(--mag); box-shadow: 0 0 6px var(--mag); }
+  .cap .meta { color: var(--dim); }
+  .cap .free { color: var(--cyan); }
+  .cap .zero { color: var(--dim); }
+  .cap .dn { color: var(--amber); }
   .err { color: var(--mag); padding: 10px; border: 1px solid var(--mag); margin-bottom: 16px; }
   @media (max-width: 700px) { .wrap { padding: 12px 10px 40px; } td.name { max-width: 200px; } }
 </style>
@@ -186,6 +210,130 @@ function section(name, c) {
   return sec;
 }
 
+const CAP_ORDER = ["tillicum", "hyak", "delta"];
+const CAP_COLS = ["PARTITION", "TYPE", "FREE", "USED", "TOTAL", "DOWN",
+  "RUNNING j/g", "PENDING j/g", "OTHERS PENDING j/g"];
+
+function capOpen() {
+  if (/(^|[?&])cap=1(&|$)/.test(location.search)) return true;
+  return localStorage.getItem("cap-open") === "1";
+}
+function fmtQ(v, unit) {
+  if (unit === "USD") return "$" + v.toFixed(2);
+  return Math.round(v) + " " + unit;
+}
+function capDigest(clusters) {
+  const bits = [];
+  for (const n of CAP_ORDER) {
+    const cap = clusters[n] && clusters[n].capacity;
+    if (!cap || !cap.ok) continue;
+    if (cap.quota) {
+      bits.push(n + " " + fmtQ(cap.quota.used, cap.quota.unit) + "/" + fmtQ(cap.quota.total, cap.quota.unit));
+    } else if (cap.accounts && cap.accounts.length) {
+      let free = 0, total = 0;
+      for (const a of cap.accounts) { free += a.free; total += a.total; }
+      bits.push(n + " " + free + "/" + total + " gpu free");
+    }
+  }
+  return bits.join(" · ");
+}
+function quotaRow(q) {
+  const div = el("div", "quota");
+  div.appendChild(el("span", "lbl", q.label || "quota"));
+  const pct = q.total ? 100 * q.used / q.total : 0;
+  const bar = el("span", "qbar" + (pct > 90 ? " hot" : pct > 75 ? " warn" : ""));
+  const fill = el("i");
+  fill.style.width = Math.min(100, Math.max(0, pct)).toFixed(1) + "%";
+  bar.appendChild(fill);
+  div.appendChild(bar);
+  div.appendChild(el("span", "", fmtQ(q.used, q.unit) + " / " + fmtQ(q.total, q.unit) +
+    " (" + pct.toFixed(0) + "%)"));
+  const meta = [];
+  if (q.period) meta.push(q.period);
+  if (q.gpu_hours !== null && q.gpu_hours !== undefined) meta.push(q.gpu_hours.toFixed(0) + " gpu h");
+  if (q.mine !== null && q.mine !== undefined) {
+    meta.push((q.mine_label || "you") + ": " + fmtQ(q.mine, q.unit));
+  }
+  if (meta.length) div.appendChild(el("span", "meta", meta.join(" · ")));
+  return div;
+}
+function accountsTable(rows) {
+  const scroll = el("div", "scroll"), table = el("table");
+  const thead = el("thead"), hr = el("tr");
+  for (const c of ["ACCOUNT", "PARTITION", "GPUS FREE", "USED", "TOTAL"]) hr.appendChild(el("th", "", c));
+  thead.appendChild(hr); table.appendChild(thead);
+  const tb = el("tbody");
+  for (const a of rows) {
+    const tr = el("tr");
+    tr.appendChild(el("td", "", a.account));
+    tr.appendChild(el("td", "", a.partition));
+    tr.appendChild(el("td", "num " + (a.free > 0 ? "free" : "zero"), String(a.free)));
+    tr.appendChild(el("td", "num", String(a.used)));
+    tr.appendChild(el("td", "num", String(a.total)));
+    tb.appendChild(tr);
+  }
+  table.appendChild(tb); scroll.appendChild(table);
+  return scroll;
+}
+function gpuTable(cap) {
+  const byPart = {};
+  for (const q of cap.queue || []) byPart[q.partition] = q;
+  const scroll = el("div", "scroll"), table = el("table");
+  const thead = el("thead"), hr = el("tr");
+  for (const c of CAP_COLS) hr.appendChild(el("th", "", c));
+  thead.appendChild(hr); table.appendChild(thead);
+  const tb = el("tbody");
+  let prev = null;
+  for (const g of cap.gpus) {
+    const tr = el("tr");
+    tr.appendChild(el("td", "", g.partition));
+    tr.appendChild(el("td", "", g.type));
+    tr.appendChild(el("td", "num " + (g.free > 0 ? "free" : "zero"), String(g.free)));
+    tr.appendChild(el("td", "num", String(g.used)));
+    tr.appendChild(el("td", "num", String(g.total)));
+    tr.appendChild(el("td", "num " + (g.down > 0 ? "dn" : "zero"), String(g.down)));
+    const q = g.partition === prev ? null : byPart[g.partition];  // queue numbers once per partition
+    tr.appendChild(el("td", "num", q ? q.running_jobs + " / " + q.running_gpus : ""));
+    tr.appendChild(el("td", "num", q ? q.pending_jobs + " / " + q.pending_gpus : ""));
+    tr.appendChild(el("td", "num", q ? q.pending_others_jobs + " / " + q.pending_others_gpus : ""));
+    prev = g.partition;
+    tb.appendChild(tr);
+  }
+  table.appendChild(tb); scroll.appendChild(table);
+  return scroll;
+}
+function capBlock(name, cap) {
+  const box = el("div", "cb");
+  box.appendChild(el("div", "h3", name));
+  if (!cap) { box.appendChild(el("div", "empty", "no data")); return box; }
+  if (!cap.ok) { box.appendChild(el("div", "offline", "OFFLINE: " + (cap.error || "unknown"))); return box; }
+  if (cap.quota) box.appendChild(quotaRow(cap.quota));
+  if (cap.accounts && cap.accounts.length) {
+    box.appendChild(el("div", "cap-note", "our allocations (hyakalloc)"));
+    box.appendChild(accountsTable(cap.accounts));
+    box.appendChild(el("div", "cap-note", "cluster-wide (reachable via ckpt)"));
+  }
+  if (cap.gpus && cap.gpus.length) box.appendChild(gpuTable(cap));
+  else box.appendChild(el("div", "empty", "no gpu partitions"));
+  return box;
+}
+function capPanel(clusters) {
+  const d = el("details", "cap");
+  d.id = "cap";
+  d.open = capOpen();
+  const sum = el("summary", "", "// CLUSTER CAPACITY & QUOTAS");
+  sum.appendChild(el("span", "digest", capDigest(clusters)));
+  d.appendChild(sum);
+  const body = el("div", "body");
+  for (const n of CAP_ORDER) {
+    if (!(n in clusters)) continue;
+    body.appendChild(capBlock(n, clusters[n].capacity));
+  }
+  d.appendChild(body);
+  d.addEventListener("toggle", () => localStorage.setItem("cap-open", d.open ? "1" : "0"));
+  return d;
+}
+
 function render(data) {
   const root = document.getElementById("clusters");
   root.textContent = "";
@@ -196,6 +344,7 @@ function render(data) {
     root.appendChild(section(n, clusters[n]));
     for (const j of clusters[n].jobs || []) { if (j.state === "RUNNING") running++; else pending++; }
   }
+  root.appendChild(capPanel(clusters));
   document.getElementById("count").firstChild.textContent = running + " running · " + pending + " queued · refresh in ";
   const err = document.getElementById("err");
   err.hidden = !data.error; err.textContent = data.error || "";
