@@ -27,6 +27,9 @@ SQUEUE_FMT = "%i|%P|%T|%M|%l|%D|%N|%R|%b|%j"
 LOCAL_PATTERN = re.compile(r"train\.py|play\.py|collect_.*\.py|probes/")
 STALL_S = 900
 NO_ITER_S = 20 * 60
+DIED_WINDOW = "now-24hours"  # sacct window for the "ended without training" strip
+DIED_MIN_ITERS = 2
+SACCT_FMT = "JobID,JobName%60,State,Elapsed,ExitCode,End"
 
 # Remote per-job extraction: "jobid<TAB>logpath<TAB>args-line<TAB>iter-line<TAB>success-line<TAB>mtime".
 # Only the tail is scanned for iteration/success (logs run to ~300k lines); the args line is near the top.
@@ -120,6 +123,66 @@ def _blank_job(cluster: str) -> dict:
     }
 
 
+# Ended jobs: iteration count from the .out plus the last exception line of the .err (the "why").
+_REMOTE_DIED_LOOP = r"""
+for j in {jobs}; do
+  f=$(ls -t {logs}/*"$j"*.out 2>/dev/null | head -1)
+  [ -z "$f" ] && continue
+  a=$(grep -m1 -a "Parsed Script CLI Args" "$f" 2>/dev/null | tr -d '\t')
+  i=$(tail -n 20000 "$f" 2>/dev/null | grep -a "Learning iteration" | tail -1 | tr -d '\t')
+  e=$(grep -a -h -E "oom_kill|Out Of Memory|^[A-Za-z_.]*(Error|Exception)[A-Za-z_.]*: " "${{f%.out}}.err" "$f" 2>/dev/null | grep -v -E "omni\.|carb\.|\[Error\]|\[Warning\]|ChildFailedError" | tail -1 | sed 's/^\[[^]]*\] //' | tr -d '\t' | cut -c1-200)
+  printf '%s\t%s\t%s\t%s\t%s\n' "$j" "$f" "$a" "$i" "$e"
+done
+"""
+
+
+def collect_died(name: str) -> list[dict]:
+    """Jobs that ended in the last 24 h with < DIED_MIN_ITERS logged iterations (import crashes, boot hangs, OOM)."""
+    cfg = CLUSTERS[name]
+    out = _ssh(cfg["host"], f'sacct -u {cfg["user"]} -X -n -P -S {DIED_WINDOW} -o {SACCT_FMT} 2>/dev/null')
+    ended: dict[str, dict] = {}
+    for line in out.splitlines():
+        parts = line.strip().split("|")
+        if len(parts) < 6 or not parts[0]:
+            continue
+        state = parts[2].split()[0]  # "CANCELLED by 123" -> CANCELLED
+        if state in ("RUNNING", "PENDING", "REQUEUED", "COMPLETING", "SUSPENDED", "RESIZING"):
+            continue
+        if state == "CANCELLED" and _elapsed_s(parts[3]) in (0, None):
+            continue  # cancelled while still queued: never ran, nothing to report
+        job = _blank_job(name)
+        slurm_name = parts[1]
+        job.update(
+            job_id=parts[0],
+            state=state,
+            elapsed=parts[3],
+            reason=parts[4],
+            end=parts[5],
+            name=slurm_name if not re.match(r"^(uwlab-dist|dist-training)-\d", slurm_name) else f"job {parts[0]}",
+            badge="DIED",
+        )
+        ended[parts[0]] = job
+    if not ended:
+        return []
+    script = _REMOTE_DIED_LOOP.format(jobs=" ".join(shlex.quote(j) for j in ended), logs=shlex.quote(cfg["logs"]))
+    out = _ssh(cfg["host"], script + " 2>/dev/null", timeout=90)
+    for line in out.splitlines():
+        cols = line.split("\t")
+        if len(cols) < 5 or cols[0] not in ended:
+            continue
+        job = ended[cols[0]]
+        job["log_path"] = cols[1]
+        job["task"], job["run_name"] = _parse_args_line(cols[2])
+        if job["run_name"]:
+            job["name"] = job["run_name"]
+        m = re.search(r"Learning iteration\s+(\d+)\s*/\s*(\d+)", cols[3])
+        if m:
+            job["iteration"], job["max_iterations"] = int(m.group(1)), int(m.group(2))
+        job["error"] = cols[4].strip()
+    died = [j for j in ended.values() if (j["iteration"] or 0) < DIED_MIN_ITERS]
+    return sorted(died, key=lambda j: j.get("end", ""), reverse=True)
+
+
 def collect_slurm(name: str) -> dict:
     cfg = CLUSTERS[name]
     result = {"ok": True, "error": None, "jobs": []}
@@ -184,6 +247,11 @@ def collect_slurm(name: str) -> dict:
     for job in jobs.values():
         job["badge"] = _badge(job)
     result["jobs"] = sorted(jobs.values(), key=lambda j: (j["state"] != "RUNNING", j["job_id"]))
+    try:
+        result["died"] = collect_died(name)
+    except (subprocess.TimeoutExpired, RuntimeError, OSError) as exc:
+        result["died"] = []
+        result["error"] = (result["error"] + "; " if result["error"] else "") + f"sacct scan failed: {exc}"
     return result
 
 

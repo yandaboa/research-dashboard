@@ -60,6 +60,13 @@
   .badge.warn { color: var(--amber); border-color: rgba(255,176,0,0.5); }
   .badge.bad { color: var(--mag); border-color: var(--mag); text-shadow: 0 0 6px var(--mag);
     box-shadow: 0 0 8px rgba(255,43,214,0.4); }
+  .died { margin-top: 8px; border: 1px solid rgba(255,43,214,0.45); padding: 6px 10px; font-size: 12px; }
+  .died .t { color: var(--mag); letter-spacing: 0.12em; font-size: 11px; margin-bottom: 4px; }
+  .died .r { display: flex; gap: 12px; flex-wrap: wrap; padding: 2px 0; border-top: 1px dashed var(--rule); }
+  .died .r:first-of-type { border-top: 0; }
+  .died .r b { color: var(--ink); font-weight: 400; }
+  .died .r .why { color: var(--amber); flex: 1 1 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .died .r .dim { color: var(--dim); }
   .gpus { color: var(--dim); font-size: 12px; margin-top: 6px; }
   .gpus b { color: var(--ink); font-weight: 400; }
   .err { color: var(--mag); padding: 10px; border: 1px solid var(--mag); margin-bottom: 16px; }
@@ -156,6 +163,20 @@ function section(name, c) {
     const tbody = el("tbody");
     for (const j of c.jobs) tbody.appendChild(row(j));
     table.appendChild(tbody); scroll.appendChild(table); sec.appendChild(scroll);
+  }
+  if (c.died && c.died.length) {
+    const box = el("div", "died");
+    box.appendChild(el("div", "t", "// ENDED WITHOUT TRAINING (24h) — " + c.died.length));
+    for (const j of c.died) {
+      const r = el("div", "r");
+      r.appendChild(el("b", "", j.job_id));
+      const nm = el("span", "", j.name || "—"); nm.title = [j.task, j.log_path].filter(Boolean).join("\n"); r.appendChild(nm);
+      r.appendChild(el("span", "dim", j.state + (j.reason ? " " + j.reason : "") + " · " + (j.elapsed || "0:00") +
+        " · iter " + (j.iteration === null || j.iteration === undefined ? "none" : j.iteration)));
+      const why = el("span", "why", j.error || "no exception found in .out/.err"); why.title = j.error || ""; r.appendChild(why);
+      box.appendChild(r);
+    }
+    sec.appendChild(box);
   }
   if (c.gpus && c.gpus.length) {
     const g = el("div", "gpus");
