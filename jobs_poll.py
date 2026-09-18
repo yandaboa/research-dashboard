@@ -42,7 +42,8 @@ for j in {jobs}; do
   s=$(tail -n 20000 "$f" 2>/dev/null | grep -a "Curriculum/pomdps/mean_success_rate" | tail -1 | tr -d '\t')
   [ -z "$s" ] && s=$(tail -n 20000 "$f" 2>/dev/null | grep -a "Metrics/task_command/any_step_success_rate" | tail -1 | tr -d '\t')
   m=$(stat -c %Y "$f" 2>/dev/null)
-  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$j" "$f" "$a" "$i" "$s" "$m"
+  w=$(grep -a -o "View run at https://wandb.ai/[^ ]*" "${{f%.out}}.err" "$f" 2>/dev/null | tail -1 | sed 's/.*View run at //')
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$j" "$f" "$a" "$i" "$s" "$m" "$w"
 done
 """
 
@@ -119,6 +120,7 @@ def _blank_job(cluster: str) -> dict:
         "success": None,
         "log_age_s": None,
         "log_path": "",
+        "wandb_url": "",
         "badge": "OK",
     }
 
@@ -131,7 +133,8 @@ for j in {jobs}; do
   a=$(grep -m1 -a "Parsed Script CLI Args" "$f" 2>/dev/null | tr -d '\t')
   i=$(tail -n 20000 "$f" 2>/dev/null | grep -a "Learning iteration" | tail -1 | tr -d '\t')
   e=$(grep -a -h -E "oom_kill|Out Of Memory|^[A-Za-z_.]*(Error|Exception)[A-Za-z_.]*: " "${{f%.out}}.err" "$f" 2>/dev/null | grep -v -E "omni\.|carb\.|\[Error\]|\[Warning\]|ChildFailedError" | tail -1 | sed 's/^\[[^]]*\] //' | tr -d '\t' | cut -c1-200)
-  printf '%s\t%s\t%s\t%s\t%s\n' "$j" "$f" "$a" "$i" "$e"
+  w=$(grep -a -o "View run at https://wandb.ai/[^ ]*" "${{f%.out}}.err" "$f" 2>/dev/null | tail -1 | sed 's/.*View run at //')
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$j" "$f" "$a" "$i" "$e" "$w"
 done
 """
 
@@ -179,6 +182,8 @@ def collect_died(name: str) -> list[dict]:
         if m:
             job["iteration"], job["max_iterations"] = int(m.group(1)), int(m.group(2))
         job["error"] = cols[4].strip()
+        if len(cols) > 5:
+            job["wandb_url"] = cols[5].strip()
     died = [j for j in ended.values() if (j["iteration"] or 0) < DIED_MIN_ITERS]
     return sorted(died, key=lambda j: j.get("end", ""), reverse=True)
 
@@ -471,6 +476,8 @@ def collect_slurm(name: str) -> dict:
                     pass
             if cols[5].strip().isdigit():
                 job["log_age_s"] = int(now - int(cols[5]))
+            if len(cols) > 6:
+                job["wandb_url"] = cols[6].strip()
 
     for job in jobs.values():
         job["badge"] = _badge(job)

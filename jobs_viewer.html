@@ -45,6 +45,8 @@
   th { color: var(--dim); font-weight: 400; font-size: 11px; letter-spacing: 0.1em; }
   tr:last-child td { border-bottom: none; }
   tr:hover td { background: rgba(0,240,255,0.04); }
+  a.wb { color: var(--ink); text-decoration: none; border-bottom: 1px dotted var(--cyan); }
+  a.wb:hover { color: var(--cyan); text-shadow: 0 0 6px rgba(0,240,255,0.6); }
   td.name { max-width: 360px; overflow: hidden; text-overflow: ellipsis; cursor: default; }
   td.num { text-align: right; font-variant-numeric: tabular-nums; }
   .empty, .offline { padding: 7px 10px; color: var(--dim); border: 1px dashed var(--rule); font-size: 12px; }
@@ -136,10 +138,17 @@ function badgeClass(b) {
   return "warn";
 }
 
+function nameLink(j) {
+  if (!j.wandb_url) return document.createTextNode(j.name || "—");
+  const a = el("a", "wb", j.name || "—");
+  a.href = j.wandb_url; a.target = "_blank"; a.rel = "noopener";
+  return a;
+}
 function row(j) {
   const tr = el("tr");
   tr.appendChild(el("td", "", j.job_id));
-  const name = el("td", "name", j.name || "—");
+  const name = el("td", "name");
+  name.appendChild(nameLink(j));
   name.title = [j.task, j.log_path].filter(Boolean).join("\n");
   tr.appendChild(name);
   const st = el("td", "st-" + j.state, j.state);
@@ -194,7 +203,7 @@ function section(name, c) {
     for (const j of c.died) {
       const r = el("div", "r");
       r.appendChild(el("b", "", j.job_id));
-      const nm = el("span", "", j.name || "—"); nm.title = [j.task, j.log_path].filter(Boolean).join("\n"); r.appendChild(nm);
+      const nm = el("span"); nm.appendChild(nameLink(j)); nm.title = [j.task, j.log_path].filter(Boolean).join("\n"); r.appendChild(nm);
       r.appendChild(el("span", "dim", j.state + (j.reason ? " " + j.reason : "") + " · " + (j.elapsed || "0:00") +
         " · iter " + (j.iteration === null || j.iteration === undefined ? "none" : j.iteration)));
       const why = el("span", "why", j.error || "no exception found in .out/.err"); why.title = j.error || ""; r.appendChild(why);
